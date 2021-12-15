@@ -1,0 +1,2561 @@
+---
+title: "211214 - NK scRNAseq cleaned up script"
+output: html_notebook
+---
+
+#### Load packages:
+```{r message=FALSE}
+library(Seurat)
+library(Matrix)
+library(dplyr)
+library(ggrepel)
+library(cowplot)
+library(ggplot2)
+library(rafalib)
+library(DOSE)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(tidyr)
+library(pheatmap)
+library(reshape2)
+```
+
+```{r}
+sessionInfo()
+```
+
+#### Load data:
+```{r}
+set1 = Read10X_h5("~/Desktop/10X_20_029_GE_filtered_feature_bc_matrix.h5", use.names = T)
+set1.htos = Read10X_h5("~/Desktop/10X_20_029_HTO_filtered_feature_bc_matrix.h5", use.names = T)
+
+set2 = Read10X_h5("~/Desktop/10X_20_030_GE_filtered_feature_bc_matrix.h5", use.names = T)
+set2.htos = Read10X_h5("~/Desktop/10X_20_030_HTO_filtered_feature_bc_matrix.h5", use.names = T)
+
+set3 = Read10X_h5("~/Desktop/10X_20_032_GE_filtered_feature_bc_matrix.h5", use.names = T)
+set3.htos = Read10X_h5("~/Desktop/10X_20_032_HTO_filtered_feature_bc_matrix.h5", use.names = T)
+```
+
+***
+# Demultiplexing with hashtag oligos (HTOs)
+```{r}
+#https://satijalab.org/seurat/v3.1/hashing_vignette.html
+
+# Select cell barcodes detected by both RNA and HTO
+joint.bcs.set1 = intersect(colnames(set1), colnames(set1.htos$`Antibody Capture`))
+joint.bcs.set2 = intersect(colnames(set2), colnames(set2.htos$`Antibody Capture`))
+joint.bcs.set3 = intersect(colnames(set3), colnames(set3.htos$`Antibody Capture`))
+
+# Subset RNA and HTO counts by joint cell barcodes
+set1 = set1[, joint.bcs.set1]
+set1.htos = as.matrix(set1.htos$`Antibody Capture`[, joint.bcs.set1])
+set2 = set2[, joint.bcs.set2]
+set2.htos = as.matrix(set2.htos$`Antibody Capture`[, joint.bcs.set2])
+set3 = set3[, joint.bcs.set3]
+set3.htos = as.matrix(set3.htos$`Antibody Capture`[, joint.bcs.set3])
+
+# Confirm that the HTO have the correct names
+rownames(set1.htos)
+rownames(set2.htos)
+rownames(set3.htos)
+```
+
+#### Rename the HTOs
+```{r}
+#       Tag 1	Tag 2	  Tag 3
+#set1:  homo  hetero  neg
+#set2:  neg   hetero	homo 
+#set3:  neg   hetero	homo 
+rownames(set1.htos) = c("hom1", "het1", "neg1")
+rownames(set2.htos) = c("neg2", "het2", "hom2")
+rownames(set3.htos) = c("neg3", "het3", "hom3")
+
+# Confirm that the HTO have the correct names
+rownames(set1.htos)
+rownames(set2.htos)
+rownames(set3.htos)
+```
+
+#### Setup Seurat object and add in the HTO data
+```{r}
+# Setup Seurat object
+set1.hashtag = CreateSeuratObject(counts = set1, project = "set1")
+set2.hashtag = CreateSeuratObject(counts = set2, project = "set2")
+set3.hashtag = CreateSeuratObject(counts = set3, project = "set3")
+```
+
+
+#### Adding HTO data as an independent assay
+```{r}
+# Add HTO data as a new assay independent from RNA
+set1.hashtag[["HTO"]] = CreateAssayObject(counts = set1.htos)
+set2.hashtag[["HTO"]] = CreateAssayObject(counts = set2.htos)
+set3.hashtag[["HTO"]] = CreateAssayObject(counts = set3.htos)
+
+# Normalize HTO data, here we use centered log-ratio (CLR) transformation
+set1.hashtag <- NormalizeData(set1.hashtag, assay = "HTO", normalization.method = "CLR")
+set2.hashtag <- NormalizeData(set2.hashtag, assay = "HTO", normalization.method = "CLR")
+set3.hashtag <- NormalizeData(set3.hashtag, assay = "HTO", normalization.method = "CLR")
+```
+
+#### Demultiplex cells based on HTO enrichment
+```{r}
+#Here we use the Seurat function HTODemux() to assign single cells back to their sample origins.
+set1.hashtag <- HTODemux(set1.hashtag, assay = "HTO", positive.quantile = 0.99)
+set2.hashtag <- HTODemux(set2.hashtag, assay = "HTO", positive.quantile = 0.99)
+set3.hashtag <- HTODemux(set3.hashtag, assay = "HTO", positive.quantile = 0.99)
+```
+
+#### Visualize demultiplexing results
+```{r}
+#Output from running HTODemux() is saved in the object metadata. We can visualize how many cells are classified as singlets, doublets and negative/ambiguous cells
+# Global classification results
+table(set1.hashtag$HTO_classification.global)
+table(set2.hashtag$HTO_classification.global)
+table(set3.hashtag$HTO_classification.global)
+```
+
+#### create a combined dataset
+```{r}
+set.all.hashtag = merge(set1.hashtag, c(set2.hashtag, set3.hashtag), add.cell.ids=c("set1","set2","set3"))
+```
+
+#### and a set only with set2 and 3
+```{r}
+set23.hashtag = merge(set2.hashtag, c(set3.hashtag), add.cell.ids=c("set2","set3"))
+```
+
+```{r, fig.height=3,fig.width=8}
+#Visualize enrichment for selected HTOs with ridge plots
+# Group cells based on the max HTO signal
+Idents(set1.hashtag) <- "HTO_maxID"
+RidgePlot(set1.hashtag, assay = "HTO", features = rownames(set1.hashtag[["HTO"]])[1:3], ncol = 3)
+Idents(set2.hashtag) <- "HTO_maxID"
+RidgePlot(set2.hashtag, assay = "HTO", features = rownames(set2.hashtag[["HTO"]])[1:3], ncol = 3)
+Idents(set3.hashtag) <- "HTO_maxID"
+RidgePlot(set3.hashtag, assay = "HTO", features = rownames(set3.hashtag[["HTO"]])[1:3], ncol = 3)
+```
+
+```{r,fig.height=9,fig.width=12}
+gg = plot_grid(ncol = 3,
+               FeatureScatter(set1.hashtag, feature1 = "hto_neg1", feature2 = "hto_het1"),
+               FeatureScatter(set1.hashtag, feature1 = "hto_neg1", feature2 = "hto_hom1"),
+               FeatureScatter(set1.hashtag, feature1 = "hto_het1", feature2 = "hto_hom1"),
+               FeatureScatter(set2.hashtag, feature1 = "hto_neg2", feature2 = "hto_het2"),
+               FeatureScatter(set2.hashtag, feature1 = "hto_neg2", feature2 = "hto_hom2"),
+               FeatureScatter(set2.hashtag, feature1 = "hto_het2", feature2 = "hto_hom2"),
+               FeatureScatter(set3.hashtag, feature1 = "hto_neg3", feature2 = "hto_het3"),
+               FeatureScatter(set3.hashtag, feature1 = "hto_neg3", feature2 = "hto_hom3"),
+               FeatureScatter(set3.hashtag, feature1 = "hto_het3", feature2 = "hto_hom3")
+              )
+gg
+```
+
+```{r}
+#Compare number of reads for singlets, doublets and negative cells
+Idents(set1.hashtag) <- "HTO_classification.global"
+VlnPlot(set1.hashtag, features = "nCount_RNA", pt.size = 0.1, log = TRUE)
+Idents(set2.hashtag) <- "HTO_classification.global"
+VlnPlot(set2.hashtag, features = "nCount_RNA", pt.size = 0.1, log = TRUE)
+Idents(set3.hashtag) <- "HTO_classification.global"
+VlnPlot(set3.hashtag, features = "nCount_RNA", pt.size = 0.1, log = TRUE)
+Idents(set.all.hashtag) <- "HTO_classification.global"
+VlnPlot(set.all.hashtag, features = "nCount_RNA", pt.size = 0.1, log = TRUE)
+Idents(set23.hashtag) <- "HTO_classification.global"
+VlnPlot(set23.hashtag, features = "nCount_RNA", pt.size = 0.1, log = TRUE)
+```
+
+#### Select single cells
+```{r}
+# First, we will remove negative cells from the object
+set1.hashtag.subset = subset(set1.hashtag, idents = "Negative", invert = TRUE)
+set2.hashtag.subset = subset(set2.hashtag, idents = "Negative", invert = TRUE)
+set3.hashtag.subset = subset(set3.hashtag, idents = "Negative", invert = TRUE)
+set.all.hashtag.subset = subset(set.all.hashtag, idents = "Negative", invert = TRUE)
+set23.hashtag.subset = subset(set23.hashtag, idents = "Negative", invert = TRUE)
+
+# Extract the singlets
+set1.singlet = subset(set1.hashtag, idents = "Singlet")
+set2.singlet = subset(set2.hashtag, idents = "Singlet")
+set3.singlet = subset(set3.hashtag, idents = "Singlet")
+set.all.singlet = subset(set.all.hashtag, idents = "Singlet")
+set23.singlet = subset(set23.hashtag, idents = "Singlet")
+```
+
+```{r}
+# Normalize HTO data, here we use centered log-ratio (CLR) transformation
+set1.singlet <- NormalizeData(set1.singlet, assay = "HTO", normalization.method = "CLR")
+set2.singlet <- NormalizeData(set2.singlet, assay = "HTO", normalization.method = "CLR")
+set3.singlet <- NormalizeData(set3.singlet, assay = "HTO", normalization.method = "CLR")
+```
+
+
+```{r, fig.height=3,fig.width=8}
+#Visualize enrichment for selected HTOs with ridge plots
+# Group cells based on the max HTO signal
+Idents(set1.singlet) <- "HTO_maxID"
+RidgePlot(set1.singlet, assay = "HTO", features = rownames(set1.singlet[["HTO"]])[1:3], ncol = 3)
+Idents(set2.singlet) <- "HTO_maxID"
+RidgePlot(set2.singlet, assay = "HTO", features = rownames(set2.singlet[["HTO"]])[1:3], ncol = 3)
+Idents(set3.singlet) <- "HTO_maxID"
+RidgePlot(set3.singlet, assay = "HTO", features = rownames(set3.singlet[["HTO"]])[1:3], ncol = 3)
+```
+
+```{r,fig.height=9,fig.width=12}
+gg = plot_grid(ncol = 3,
+               FeatureScatter(set1.singlet, feature1 = "hto_neg1", feature2 = "hto_het1"),
+               FeatureScatter(set1.singlet, feature1 = "hto_neg1", feature2 = "hto_hom1"),
+               FeatureScatter(set1.singlet, feature1 = "hto_het1", feature2 = "hto_hom1"),
+               FeatureScatter(set2.singlet, feature1 = "hto_neg2", feature2 = "hto_het2"),
+               FeatureScatter(set2.singlet, feature1 = "hto_neg2", feature2 = "hto_hom2"),
+               FeatureScatter(set2.singlet, feature1 = "hto_het2", feature2 = "hto_hom2"),
+               FeatureScatter(set3.singlet, feature1 = "hto_neg3", feature2 = "hto_het3"),
+               FeatureScatter(set3.singlet, feature1 = "hto_neg3", feature2 = "hto_hom3"),
+               FeatureScatter(set3.singlet, feature1 = "hto_het3", feature2 = "hto_hom3")
+)
+gg
+```
+
+
+***
+# Calculate QC 
+```{r, results='hold'}
+# Way1: Doing it using Seurat function
+all.data = set.all.singlet
+all.data <- PercentageFeatureSet(all.data, "^mt-", col.name = "percent_mito")
+
+# Way2: Doing it manually
+total_counts_per_cell <- colSums(all.data@assays$RNA@counts  )
+mito_genes <- rownames(all.data)[grep("^mt-",rownames(all.data))]
+all.data$percent_mito <- colSums(all.data@assays$RNA@counts[mito_genes,]) / total_counts_per_cell
+
+head(mito_genes,10)
+
+total_counts_per_cell1 <- colSums(set1.singlet@assays$RNA@counts  )
+mito_genes <- rownames(set1.singlet)[grep("^mt-",rownames(set1.singlet))]
+set1.singlet$percent_mito <- colSums(set1.singlet@assays$RNA@counts[mito_genes,]) / total_counts_per_cell1
+
+total_counts_per_cell2 <- colSums(set2.singlet@assays$RNA@counts  )
+mito_genes <- rownames(set2.singlet)[grep("^mt-",rownames(set2.singlet))]
+set2.singlet$percent_mito <- colSums(set2.singlet@assays$RNA@counts[mito_genes,]) / total_counts_per_cell2
+
+total_counts_per_cell3 <- colSums(set3.singlet@assays$RNA@counts  )
+mito_genes <- rownames(set3.singlet)[grep("^mt-",rownames(set3.singlet))]
+set3.singlet$percent_mito <- colSums(set3.singlet@assays$RNA@counts[mito_genes,]) / total_counts_per_cell3
+
+total_counts_per_cell23 <- colSums(set23.singlet@assays$RNA@counts  )
+mito_genes <- rownames(set23.singlet)[grep("^mt-",rownames(set23.singlet))]
+set23.singlet$percent_mito <- colSums(set23.singlet@assays$RNA@counts[mito_genes,]) / total_counts_per_cell23
+
+```
+
+```{r}
+#In the same manner we will calculate the proportion gene expression that comes from ribosomal proteins.
+
+# Way1: Doing it using Seurat function
+all.data <- PercentageFeatureSet(all.data, "^Rp[sl]", col.name = "percent_ribo")
+
+# Way2: Doing it manually
+ribo_genes <- rownames(all.data)[grep("^Rp[sl]",rownames(all.data))]
+head(ribo_genes,10)
+all.data$percent_ribo <- colSums( all.data@assays$RNA@counts[ribo_genes,]  ) / total_counts_per_cell
+
+ribo_genes1 <- rownames(set1.singlet)[grep("^Rp[sl]",rownames(set1.singlet))]
+head(ribo_genes1,10)
+set1.singlet$percent_ribo <- colSums( set1.singlet@assays$RNA@counts[ribo_genes1,]  ) / total_counts_per_cell1
+
+ribo_genes2 <- rownames(set2.singlet)[grep("^Rp[sl]",rownames(set2.singlet))]
+head(ribo_genes2,10)
+set2.singlet$percent_ribo <- colSums( set2.singlet@assays$RNA@counts[ribo_genes2,]  ) / total_counts_per_cell2
+
+ribo_genes3 <- rownames(set3.singlet)[grep("^Rp[sl]",rownames(set3.singlet))]
+head(ribo_genes3,10)
+set3.singlet$percent_ribo <- colSums( set3.singlet@assays$RNA@counts[ribo_genes3,]  ) / total_counts_per_cell3
+
+ribo_genes23 <- rownames(set23.singlet)[grep("^Rp[sl]",rownames(set23.singlet))]
+head(ribo_genes23,10)
+set23.singlet$percent_ribo <- colSums( set23.singlet@assays$RNA@counts[ribo_genes23,]  ) / total_counts_per_cell23
+```
+
+#### Plot QC
+```{r}
+#Now we can plot some of the QC-features as violin plots.
+feats <- c("nFeature_RNA","nCount_RNA","percent_mito","percent_ribo")
+VlnPlot(all.data, group.by= "HTO_classification", features = feats, pt.size = 0.1,ncol = 4) + NoLegend()
+
+VlnPlot(set1.singlet, group.by= "HTO_classification", features = feats, pt.size = 0.1,ncol = 4) + NoLegend()
+
+VlnPlot(set2.singlet, group.by= "HTO_classification", features = feats, pt.size = 0.1,ncol = 4) + NoLegend()
+
+VlnPlot(set3.singlet, group.by= "HTO_classification", features = feats, pt.size = 0.1,ncol = 4) + NoLegend()
+
+VlnPlot(set23.singlet, group.by= "HTO_classification", features = feats, pt.size = 0.1,ncol = 4) + NoLegend()
+
+```
+
+***
+# Filtering
+
+## Detection-based filtering
+```{r}
+#Number of genes and cells to start with:
+dim(all.data)
+dim(set1.singlet)
+dim(set2.singlet)
+dim(set3.singlet)
+dim(set23.singlet)
+
+selected_c <- WhichCells(all.data, expression = nFeature_RNA > 1000)
+selected_f <- rownames(all.data)[ Matrix::rowSums(all.data) > 3]
+all.data.filt <- subset(all.data, features=selected_f, cells=selected_c)
+dim(all.data.filt)
+
+selected_c <- WhichCells(set1.singlet, expression = nFeature_RNA > 1000)
+selected_f <- rownames(set1.singlet)[ Matrix::rowSums(set1.singlet) > 3]
+set1.singlet.filt <- subset(set1.singlet, features=selected_f, cells=selected_c)
+dim(set1.singlet.filt)
+
+selected_c <- WhichCells(set2.singlet, expression = nFeature_RNA > 1000)
+selected_f <- rownames(set2.singlet)[ Matrix::rowSums(set2.singlet) > 3]
+set2.singlet.filt <- subset(set2.singlet, features=selected_f, cells=selected_c)
+dim(set2.singlet.filt)
+
+selected_c <- WhichCells(set3.singlet, expression = nFeature_RNA > 1000)
+selected_f <- rownames(set3.singlet)[ Matrix::rowSums(set3.singlet) > 3]
+set3.singlet.filt <- subset(set3.singlet, features=selected_f, cells=selected_c)
+dim(set3.singlet.filt)
+
+selected_c <- WhichCells(set23.singlet, expression = nFeature_RNA > 1000)
+selected_f <- rownames(set23.singlet)[ Matrix::rowSums(set23.singlet) > 3]
+set23.singlet.filt <- subset(set23.singlet, features=selected_f, cells=selected_c)
+dim(set23.singlet.filt)
+```
+
+
+```{r}
+#Extremely high number of detected genes could indicate doublets. So remove these
+high.det.all <- WhichCells(all.data.filt, expression = nFeature_RNA > 4100)
+all.data.filt <- subset(all.data.filt, cells=setdiff(WhichCells(all.data.filt),c(high.det.all)))
+dim(all.data.filt)
+
+high.det.set3 <- WhichCells(set3.singlet.filt, expression = nFeature_RNA > 4100)
+set3.singlet.filt <- subset(set3.singlet.filt, cells=setdiff(WhichCells(set3.singlet.filt),c(high.det.set3)))
+dim(set3.singlet.filt)
+
+high.det.set23 <- WhichCells(set23.singlet.filt, expression = nFeature_RNA > 4100)
+set23.singlet.filt <- subset(set23.singlet.filt, cells=setdiff(WhichCells(set23.singlet.filt),c(high.det.set23)))
+dim(set23.singlet.filt)
+
+#only set 3 has cells with more than 4100 features
+```
+
+```{r}
+#Compute the relative expression of each gene per cell
+rel_expression <- t( t(all.data.filt@assays$RNA@counts) / Matrix::colSums(all.data.filt@assays$RNA@counts)) * 100
+most_expressed <- sort(Matrix::rowSums( rel_expression ),T)[20:1] / ncol(all.data.filt)
+
+par(mfrow=c(1,2),mar=c(4,6,1,1))
+boxplot( as.matrix(t(rel_expression[names(most_expressed),])),cex=.1, las=1, xlab="% total count per cell",col=scales::hue_pal()(20)[20:1],horizontal=TRUE, main = "all.data.filt")
+
+rel_expression <- t( t(set1.singlet.filt@assays$RNA@counts) / Matrix::colSums(set1.singlet.filt@assays$RNA@counts)) * 100
+most_expressed <- sort(Matrix::rowSums( rel_expression ),T)[20:1] / ncol(set1.singlet.filt)
+
+par(mfrow=c(1,2),mar=c(4,6,1,1))
+boxplot( as.matrix(t(rel_expression[names(most_expressed),])),cex=.1, las=1, xlab="% total count per cell",col=scales::hue_pal()(20)[20:1],horizontal=TRUE, main = "set1.singlet.filt")
+
+rel_expression <- t( t(set2.singlet.filt@assays$RNA@counts) / Matrix::colSums(set2.singlet.filt@assays$RNA@counts)) * 100
+most_expressed <- sort(Matrix::rowSums( rel_expression ),T)[20:1] / ncol(set2.singlet.filt)
+
+par(mfrow=c(1,2),mar=c(4,6,1,1))
+boxplot( as.matrix(t(rel_expression[names(most_expressed),])),cex=.1, las=1, xlab="% total count per cell",col=scales::hue_pal()(20)[20:1],horizontal=TRUE, main = "set2.singlet.filt")
+
+rel_expression <- t( t(set3.singlet.filt@assays$RNA@counts) / Matrix::colSums(set3.singlet.filt@assays$RNA@counts)) * 100
+most_expressed <- sort(Matrix::rowSums( rel_expression ),T)[20:1] / ncol(set3.singlet.filt)
+
+par(mfrow=c(1,2),mar=c(4,6,1,1))
+boxplot( as.matrix(t(rel_expression[names(most_expressed),])),cex=.1, las=1, xlab="% total count per cell",col=scales::hue_pal()(20)[20:1],horizontal=TRUE, main = "set3.singlet.filt")
+
+rel_expression <- t( t(set23.singlet.filt@assays$RNA@counts) / Matrix::colSums(set23.singlet.filt@assays$RNA@counts)) * 100
+most_expressed <- sort(Matrix::rowSums( rel_expression ),T)[20:1] / ncol(set23.singlet.filt)
+
+par(mfrow=c(1,2),mar=c(4,6,1,1))
+boxplot( as.matrix(t(rel_expression[names(most_expressed),])),cex=.1, las=1, xlab="% total count per cell",col=scales::hue_pal()(20)[20:1],horizontal=TRUE, main = "set23.singlet.filt")
+```
+
+#### Mito/Ribo filtering
+```{r}
+selected_mito <- WhichCells(all.data.filt, expression = percent_mito < 0.25)
+selected_ribo <- WhichCells(all.data.filt, expression = percent_ribo > 0.05)
+
+# and subset the object to only keep those cells
+all.data.filt <- subset(all.data.filt, cells = selected_mito)
+all.data.filt <- subset(all.data.filt, cells = selected_ribo)
+dim(all.data.filt)
+
+selected_mito <- WhichCells(set1.singlet.filt, expression = percent_mito < 0.25)
+selected_ribo <- WhichCells(set1.singlet.filt, expression = percent_ribo > 0.05)
+set1.singlet.filt <- subset(set1.singlet.filt, cells = selected_mito)
+set1.singlet.filt <- subset(set1.singlet.filt, cells = selected_ribo)
+dim(set1.singlet.filt)
+
+selected_mito <- WhichCells(set2.singlet.filt, expression = percent_mito < 0.25)
+selected_ribo <- WhichCells(set2.singlet.filt, expression = percent_ribo > 0.05)
+set2.singlet.filt <- subset(set2.singlet.filt, cells = selected_mito)
+set2.singlet.filt <- subset(set2.singlet.filt, cells = selected_ribo)
+dim(set2.singlet.filt)
+
+selected_mito <- WhichCells(set3.singlet.filt, expression = percent_mito < 0.25)
+selected_ribo <- WhichCells(set3.singlet.filt, expression = percent_ribo > 0.05)
+set3.singlet.filt <- subset(set3.singlet.filt, cells = selected_mito)
+set3.singlet.filt <- subset(set3.singlet.filt, cells = selected_ribo)
+dim(set3.singlet.filt)
+
+selected_mito <- WhichCells(set23.singlet.filt, expression = percent_mito < 0.25)
+selected_ribo <- WhichCells(set23.singlet.filt, expression = percent_ribo > 0.05)
+set23.singlet.filt <- subset(set23.singlet.filt, cells = selected_mito)
+set23.singlet.filt <- subset(set23.singlet.filt, cells = selected_ribo)
+dim(set23.singlet.filt)
+```
+
+#### Plot filtered QC
+```{r}
+feats <- c("nFeature_RNA","nCount_RNA","percent_mito","percent_ribo")
+VlnPlot(all.data, group.by= "HTO_classification", features = feats, pt.size = 0.1,ncol = 4) + NoLegend()
+```
+
+#### Removing rRNA and mtRNA
+```{r}
+all.data.mtr.filt <- all.data.filt[ ! grepl("^Rp[sl]", rownames(all.data.filt)), ]
+all.data.mtr.filt <- all.data.mtr.filt[ ! grepl("^mt-", rownames(all.data.mtr.filt)), ]
+
+set1.mtr.filt <- set1.singlet.filt[ ! grepl("^Rp[sl]", rownames(set1.singlet.filt)), ]
+set1.mtr.filt <- set1.mtr.filt[ ! grepl("^mt-", rownames(set1.mtr.filt)), ]
+
+set2.mtr.filt <- set2.singlet.filt[ ! grepl("^Rp[sl]", rownames(set2.singlet.filt)), ]
+set2.mtr.filt <- set2.mtr.filt[ ! grepl("^mt-", rownames(set2.mtr.filt)), ]
+
+set3.mtr.filt <- set3.singlet.filt[ ! grepl("^Rp[sl]", rownames(set3.singlet.filt)), ]
+set3.mtr.filt <- set3.mtr.filt[ ! grepl("^mt-", rownames(set3.mtr.filt)), ]
+
+set23.mtr.filt <- set23.singlet.filt[ ! grepl("^Rp[sl]", rownames(set23.singlet.filt)), ]
+set23.mtr.filt <- set23.mtr.filt[ ! grepl("^mt-", rownames(set23.mtr.filt)), ]
+```
+
+```{r}
+#Compute the relative expression of each gene per cell
+rel_expression <- t( t(all.data.mtr.filt@assays$RNA@counts) / Matrix::colSums(all.data.mtr.filt@assays$RNA@counts)) * 100
+most_expressed <- sort(Matrix::rowSums( rel_expression ),T)[20:1] / ncol(all.data.mtr.filt)
+
+par(mfrow=c(1,2),mar=c(4,6,1,1))
+boxplot( as.matrix(t(rel_expression[names(most_expressed),])),cex=.1, las=1, xlab="% total count per cell",col=scales::hue_pal()(20)[20:1],horizontal=TRUE, main = "all.data.mtr.filt")
+
+rel_expression <- t( t(set1.mtr.filt@assays$RNA@counts) / Matrix::colSums(set1.mtr.filt@assays$RNA@counts)) * 100
+most_expressed <- sort(Matrix::rowSums( rel_expression ),T)[20:1] / ncol(set1.mtr.filt)
+
+par(mfrow=c(1,2),mar=c(4,6,1,1))
+boxplot( as.matrix(t(rel_expression[names(most_expressed),])),cex=.1, las=1, xlab="% total count per cell",col=scales::hue_pal()(20)[20:1],horizontal=TRUE, main = "set1.mtr.filt")
+
+rel_expression <- t( t(set2.mtr.filt@assays$RNA@counts) / Matrix::colSums(set2.mtr.filt@assays$RNA@counts)) * 100
+most_expressed <- sort(Matrix::rowSums( rel_expression ),T)[20:1] / ncol(set2.mtr.filt)
+
+par(mfrow=c(1,2),mar=c(4,6,1,1))
+boxplot( as.matrix(t(rel_expression[names(most_expressed),])),cex=.1, las=1, xlab="% total count per cell",col=scales::hue_pal()(20)[20:1],horizontal=TRUE, main = "set2.mtr.filt")
+
+rel_expression <- t( t(set3.mtr.filt@assays$RNA@counts) / Matrix::colSums(set3.mtr.filt@assays$RNA@counts)) * 100
+most_expressed <- sort(Matrix::rowSums( rel_expression ),T)[20:1] / ncol(set3.mtr.filt)
+
+par(mfrow=c(1,2),mar=c(4,6,1,1))
+boxplot( as.matrix(t(rel_expression[names(most_expressed),])),cex=.1, las=1, xlab="% total count per cell",col=scales::hue_pal()(20)[20:1],horizontal=TRUE, main = "set3.mtr.filt")
+
+rel_expression <- t( t(set23.mtr.filt@assays$RNA@counts) / Matrix::colSums(set23.mtr.filt@assays$RNA@counts)) * 100
+most_expressed <- sort(Matrix::rowSums( rel_expression ),T)[20:1] / ncol(set23.mtr.filt)
+
+par(mfrow=c(1,2),mar=c(4,6,1,1))
+boxplot( as.matrix(t(rel_expression[names(most_expressed),])),cex=.1, las=1, xlab="% total count per cell",col=scales::hue_pal()(20)[20:1],horizontal=TRUE, main = "set23.mtr.filt")
+```
+
+#### Remove X and Y chromosome genes
+```{bash}
+#generate a list of gene names to exclude
+#cd ~/Desktop/
+#awk '$3 == "gene"' gencode.vM25.basic.annotation.gtf > gencode.vM25.basic.annotation_temp.gtf
+#grep chr[XY] gencode.vM25.basic.annotation_temp.gtf > gencode.vM25.basic.annotation.XYonly.gtf
+```
+```{bash}
+#cd ~/Desktop/
+#cut -f9 gencode.vM25.basic.annotation.XYonly.gtf > gencode.vM25.basic.annotation.XYonly_temp.gtf
+```
+```{bash}
+#cd ~/Desktop/
+#awk '{print $6}' gencode.vM25.basic.annotation.XYonly_temp.gtf > 200907_gencode.vM25_XYgenes.txt
+```
+
+```{r}
+gencode.vM25_XYgenes <- read.delim("~/Desktop/NK_scRNA_input/200907_gencode.vM25_XYgenes.txt", header=FALSE, sep=";")
+gencode.vM25_XYgenes = gencode.vM25_XYgenes[,1]
+```
+
+```{r}
+set1.mtr.XY.filt = set1.mtr.filt
+for (i in 1:length(gencode.vM25_XYgenes))
+{
+set1.mtr.XY.filt <- set1.mtr.XY.filt[ ! grepl(gencode.vM25_XYgenes[[i]], rownames(set1.mtr.XY.filt)), ]
+}
+
+set2.mtr.XY.filt = set2.mtr.filt
+for (i in 1:length(gencode.vM25_XYgenes))
+{
+set2.mtr.XY.filt <- set2.mtr.XY.filt[ ! grepl(gencode.vM25_XYgenes[[i]], rownames(set2.mtr.XY.filt)), ]
+}
+
+set3.mtr.XY.filt = set3.mtr.filt
+for (i in 1:length(gencode.vM25_XYgenes))
+{
+set3.mtr.XY.filt <- set3.mtr.XY.filt[ ! grepl(gencode.vM25_XYgenes[[i]], rownames(set3.mtr.XY.filt)), ]
+}
+
+all.data.mtr.XY.filt = all.data.mtr.filt
+for (i in 1:length(gencode.vM25_XYgenes))
+{
+all.data.mtr.XY.filt <- all.data.mtr.XY.filt[ ! grepl(gencode.vM25_XYgenes[[i]], rownames(all.data.mtr.XY.filt)), ]
+}
+
+set23.mtr.XY.filt = set23.mtr.filt
+for (i in 1:length(gencode.vM25_XYgenes))
+{
+set23.mtr.XY.filt <- set23.mtr.XY.filt[ ! grepl(gencode.vM25_XYgenes[[i]], rownames(set23.mtr.XY.filt)), ]
+}
+```
+
+#### Save files
+```{r}
+#Removing X and Y chromosomes takes a  long time. So it is better to save the R files here and re-loading them instead of re-doing it again later
+saveRDS(set1.mtr.XY.filt,"~/Desktop/200909_NKscRNAseq_set1.mtr.XY.filt.rds")
+saveRDS(set2.mtr.XY.filt,"~/Desktop/200909_NKscRNAseq_set2.mtr.XY.filt.rds")
+saveRDS(set3.mtr.XY.filt,"~/Desktop/200909_NKscRNAseq_set3.mtr.XY.filt.rds")
+saveRDS(all.data.mtr.XY.filt,"~/Desktop/200909_NKscRNAseq_all.data.mtr.XY.filt.rds")
+saveRDS(set23.mtr.XY.filt,"~/Desktop/200910_NKscRNAseq_set23.mtr.XY.filt.rds")
+
+```
+
+#### Re-load files 
+```{r}
+set1.mtr.XY.filt = readRDS("~/Desktop/NK_scRNA_input/200909_NKscRNAseq_set1.mtr.XY.filt.rds")
+set2.mtr.XY.filt = readRDS("~/Desktop/NK_scRNA_input/200909_NKscRNAseq_set2.mtr.XY.filt.rds")
+set3.mtr.XY.filt = readRDS("~/Desktop/NK_scRNA_input/200909_NKscRNAseq_set3.mtr.XY.filt.rds")
+all.data.mtr.XY.filt = readRDS("~/Desktop/NK_scRNA_input/200909_NKscRNAseq_all.data.mtr.XY.filt.rds")
+set23.mtr.XY.filt = readRDS("~/Desktop/NK_scRNA_input/200910_NKscRNAseq_set23.mtr.XY.filt.rds")
+```
+
+#### remove additional low nFeature cells
+```{r}
+selected_c <- WhichCells(set1.mtr.XY.filt, expression = nFeature_RNA > 1100)
+set1.mtr.XY.filt <- subset(set1.mtr.XY.filt, cells=selected_c)
+dim(set1.mtr.XY.filt)
+
+selected_c <- WhichCells(set2.mtr.XY.filt, expression = nFeature_RNA > 1100)
+set2.mtr.XY.filt <- subset(set2.mtr.XY.filt, cells=selected_c)
+dim(set2.mtr.XY.filt)
+
+selected_c <- WhichCells(set3.mtr.XY.filt, expression = nFeature_RNA > 1100)
+set3.mtr.XY.filt <- subset(set3.mtr.XY.filt, cells=selected_c)
+dim(set3.mtr.XY.filt)
+
+selected_c <- WhichCells(all.data.mtr.XY.filt, expression = nFeature_RNA > 1100)
+all.data.mtr.XY.filt <- subset(all.data.mtr.XY.filt, cells=selected_c)
+dim(all.data.mtr.XY.filt)
+
+selected_c <- WhichCells(set23.mtr.XY.filt, expression = nFeature_RNA > 1100)
+set23.mtr.XY.filt <- subset(set23.mtr.XY.filt, cells=selected_c)
+dim(set23.mtr.XY.filt)
+```
+
+#### Add a metadata column with H2-D1 expression info
+```{r}
+set1.mtr.XY.filt$h2d1exp = "h2d1exp"
+for (i in 1:length(set1.mtr.XY.filt@assays$RNA@data['H2-D1',])) {
+    set1.mtr.XY.filt$h2d1exp[i] = set1.mtr.XY.filt@assays$RNA@data['H2-D1',i]
+}
+```
+```{r}
+set2.mtr.XY.filt$h2d1exp = "h2d1exp"
+for (i in 1:length(set2.mtr.XY.filt@assays$RNA@data['H2-D1',])) {
+    set2.mtr.XY.filt$h2d1exp[i] = set2.mtr.XY.filt@assays$RNA@data['H2-D1',i]
+}
+
+set3.mtr.XY.filt$h2d1exp = "h2d1exp"
+for (i in 1:length(set3.mtr.XY.filt@assays$RNA@data['H2-D1',])) {
+    set3.mtr.XY.filt$h2d1exp[i] = set3.mtr.XY.filt@assays$RNA@data['H2-D1',i]
+}
+
+set23.mtr.XY.filt$h2d1exp = "h2d1exp"
+for (i in 1:length(set23.mtr.XY.filt@assays$RNA@data['H2-D1',])) {
+    set23.mtr.XY.filt$h2d1exp[i] = set23.mtr.XY.filt@assays$RNA@data['H2-D1',i]
+}
+
+all.data.mtr.XY.filt$h2d1exp = "h2d1exp"
+for (i in 1:length(all.data.mtr.XY.filt@assays$RNA@data['H2-D1',])) {
+    all.data.mtr.XY.filt$h2d1exp[i] = all.data.mtr.XY.filt@assays$RNA@data['H2-D1',i]
+}
+```
+
+#### Normalize RNA data
+```{r}
+# Normalize RNA data with log normalization 
+all.data.mtr.XY.filt = NormalizeData(all.data.mtr.XY.filt)
+set1.mtr.XY.filt = NormalizeData(set1.mtr.XY.filt)
+set2.mtr.XY.filt = NormalizeData(set2.mtr.XY.filt)
+set3.mtr.XY.filt = NormalizeData(set3.mtr.XY.filt)
+set23.mtr.XY.filt = NormalizeData(set23.mtr.XY.filt)
+```
+
+#### Add a metadata column with normalized H2-D1 expression info
+```{r}
+#note I used the same column for the raw counts, because the "data" column only has the counts before the first normalization is run
+set1.mtr.XY.filt$h2d1norm = "h2d1norm"
+for (i in 1:length(set1.mtr.XY.filt@assays$RNA@data['H2-D1',])) {
+    set1.mtr.XY.filt$h2d1norm[i] = set1.mtr.XY.filt@assays$RNA@data['H2-D1',i]
+}
+
+set2.mtr.XY.filt$h2d1norm = "h2d1norm"
+for (i in 1:length(set2.mtr.XY.filt@assays$RNA@data['H2-D1',])) {
+    set2.mtr.XY.filt$h2d1norm[i] = set2.mtr.XY.filt@assays$RNA@data['H2-D1',i]
+}
+
+set3.mtr.XY.filt$h2d1norm = "h2d1norm"
+for (i in 1:length(set3.mtr.XY.filt@assays$RNA@data['H2-D1',])) {
+    set3.mtr.XY.filt$h2d1norm[i] = set3.mtr.XY.filt@assays$RNA@data['H2-D1',i]
+}
+
+set23.mtr.XY.filt$h2d1norm = "h2d1norm"
+for (i in 1:length(set23.mtr.XY.filt@assays$RNA@data['H2-D1',])) {
+    set23.mtr.XY.filt$h2d1norm[i] = set23.mtr.XY.filt@assays$RNA@data['H2-D1',i]
+}
+
+all.data.mtr.XY.filt$h2d1norm = "h2d1norm"
+for (i in 1:length(all.data.mtr.XY.filt@assays$RNA@data['H2-D1',])) {
+    all.data.mtr.XY.filt$h2d1norm[i] = all.data.mtr.XY.filt@assays$RNA@data['H2-D1',i]
+}
+```
+
+####Save files
+```{r}
+#Adding the h2d1 expression column takes a  long time. So it is better to save the R files here and re-loading them instead of re-doing it again later
+saveRDS(set1.mtr.XY.filt,"~/Desktop/201014_NKscRNAseq_set1.mtr.XY.filt.rds")
+saveRDS(set2.mtr.XY.filt,"~/Desktop/201014_NKscRNAseq_set2.mtr.XY.filt.rds")
+saveRDS(set3.mtr.XY.filt,"~/Desktop/201014_NKscRNAseq_set3.mtr.XY.filt.rds")
+saveRDS(all.data.mtr.XY.filt,"~/Desktop/201014_NKscRNAseq_all.data.mtr.XY.filt.rds")
+saveRDS(set23.mtr.XY.filt,"~/Desktop/201014_NKscRNAseq_set23.mtr.XY.filt.rds")
+```
+
+#### Re-load files 
+```{r}
+set1.mtr.XY.filt = readRDS("~/Desktop/NK_scRNA_input/201014_NKscRNAseq_set1.mtr.XY.filt.rds")
+set2.mtr.XY.filt = readRDS("~/Desktop/NK_scRNA_input/201014_NKscRNAseq_set2.mtr.XY.filt.rds")
+set3.mtr.XY.filt = readRDS("~/Desktop/NK_scRNA_input/201014_NKscRNAseq_set3.mtr.XY.filt.rds")
+all.data.mtr.XY.filt = readRDS("~/Dropbox/200716_scRNA_seq_data_Thuy_Nadir/201014_NKscRNAseq_all.data.mtr.XY.filt.rds")
+set23.mtr.XY.filt = readRDS("~/Dropbox/200716_scRNA_seq_data_Thuy_Nadir/201014_NKscRNAseq_set23.mtr.XY.filt.rds")
+```
+
+```{r}
+colors = c("blue","blue","blue","red","red","red","grey","grey","grey")
+features <- c("H2-D1")
+RidgePlot(all.data.mtr.XY.filt, features = features, ncol = 2, group.by = "HTO_classification", cols=colors)
+vioplo1 = VlnPlot(all.data.mtr.XY.filt, 
+        features = features, 
+        group.by = "HTO_classification", 
+        cols=colors,
+        pt.size = 0.1
+        )
+vioplo1
+```
+
+```{r}
+pdf("~/Desktop/201205_FigSA_H2D1_Violin_before_remove.pdf",width=6,height=4,paper='special') 
+vioplo1
+dev.off()
+```
+
+#### remove H2-D1-neg cells from sorted H2-D1+ cells and H2-D1+ cells from sorted H2-D1-neg cells
+```{r}
+set1.mtr.XY.filt <- subset(set1.mtr.XY.filt, 
+                                ((HTO_classification == "hom1") & (subset = `H2-D1` > 0.5)) |
+                                ((HTO_classification == "het1") & (subset = `H2-D1` > 0.5)) |
+                                ((HTO_classification == "neg1") & (subset = `H2-D1` < 0.5))
+                                )
+
+set2.mtr.XY.filt <- subset(set2.mtr.XY.filt, 
+                                ((HTO_classification == "hom2") & (subset = `H2-D1` > 0.5)) |
+                                ((HTO_classification == "het2") & (subset = `H2-D1` > 0.5)) |
+                                ((HTO_classification == "neg2") & (subset = `H2-D1` < 0.5))
+                                )
+
+set3.mtr.XY.filt <- subset(set3.mtr.XY.filt, 
+                                ((HTO_classification == "hom3") & (subset = `H2-D1` > 0.5)) |
+                                ((HTO_classification == "het3") & (subset = `H2-D1` > 0.5)) |
+                                ((HTO_classification == "neg3") & (subset = `H2-D1` < 0.5))
+                                )
+
+all.data.mtr.XY.filt <- subset(all.data.mtr.XY.filt, 
+                                ((HTO_classification == "hom1") & (subset = `H2-D1` > 0.5)) |
+                                ((HTO_classification == "het1") & (subset = `H2-D1` > 0.5)) |
+                                ((HTO_classification == "neg1") & (subset = `H2-D1` < 0.5)) |
+                                ((HTO_classification == "hom2") & (subset = `H2-D1` > 0.5)) |
+                                ((HTO_classification == "het2") & (subset = `H2-D1` > 0.5)) |
+                                ((HTO_classification == "neg2") & (subset = `H2-D1` < 0.5)) |
+                                ((HTO_classification == "hom3") & (subset = `H2-D1` > 0.5)) |
+                                ((HTO_classification == "het3") & (subset = `H2-D1` > 0.5)) |
+                                ((HTO_classification == "neg3") & (subset = `H2-D1` < 0.5)) 
+                                 
+                                )
+
+set23.mtr.XY.filt <- subset(set23.mtr.XY.filt, 
+                                ((HTO_classification == "hom2") & (subset = `H2-D1` > 0.5)) |
+                                ((HTO_classification == "het2") & (subset = `H2-D1` > 0.5)) |
+                                ((HTO_classification == "neg2") & (subset = `H2-D1` < 0.5)) |
+                                ((HTO_classification == "hom3") & (subset = `H2-D1` > 0.5)) |
+                                ((HTO_classification == "het3") & (subset = `H2-D1` > 0.5)) |
+                                ((HTO_classification == "neg3") & (subset = `H2-D1` < 0.5)) 
+                                 
+                                )
+```
+
+```{r}
+colors = c("blue","blue","blue","red","red","red","grey","grey","grey")
+features <- c("H2-D1")
+#RidgePlot(all.data.mtr.XY.filt, features = features, ncol = 2, group.by = "HTO_classification", cols=colors)
+vioplo = VlnPlot(all.data.mtr.XY.filt, 
+        features = features, 
+        group.by = "HTO_classification", 
+        cols=colors,
+        pt.size = 0.1
+        )
+vioplo
+```
+
+
+```{r}
+pdf("~/Desktop/201205_FigSA_H2D1_Violin_after_remove.pdf",width=6,height=4,paper='special') 
+vioplo
+dev.off()
+```
+
+#### Removing the H2-D1 gene from the dataset
+```{r}
+all.data.mtr.XY.filt <- all.data.mtr.XY.filt[ ! grepl("H2-D1", rownames(all.data.mtr.XY.filt)), ]
+set1.mtr.XY.filt <- set1.mtr.XY.filt[ ! grepl("H2-D1", rownames(set1.mtr.XY.filt)), ]
+set2.mtr.XY.filt <- set2.mtr.XY.filt[ ! grepl("H2-D1", rownames(set2.mtr.XY.filt)), ]
+set3.mtr.XY.filt <- set3.mtr.XY.filt[ ! grepl("H2-D1", rownames(set3.mtr.XY.filt)), ]
+set23.mtr.XY.filt <- set23.mtr.XY.filt[ ! grepl("H2-D1", rownames(set23.mtr.XY.filt)), ]
+```
+
+#### renaming
+```{r}
+all.data.filt = all.data.mtr.XY.filt
+set1.filt = set1.mtr.XY.filt
+set2.filt = set2.mtr.XY.filt
+set3.filt = set3.mtr.XY.filt
+set23.filt = set23.mtr.XY.filt
+```
+
+#### subsetting to a condition without Dd het
+```{r}
+set23.filt.nohet = subset(set23.filt,
+                                HTO_classification != "het2" &
+                                HTO_classification != "het3")
+
+all.data.filt.nohet = subset(all.data.filt, 
+                                HTO_classification != "het1" &
+                                HTO_classification != "het2" &
+                                HTO_classification != "het3")
+
+```
+
+***
+# Dimensionality reduction
+### Feature selection
+```{r}
+all.data.filt <- FindVariableFeatures(all.data.filt, selection.method = "vst", nfeatures = 1000,verbose = FALSE,assay = "RNA")
+top20_all.data.filt <- head(VariableFeatures(all.data.filt), 20)
+LabelPoints(plot = VariableFeaturePlot(all.data.filt), points = top20_all.data.filt, repel = TRUE)
+
+all.data.filt.nohet <- FindVariableFeatures(all.data.filt.nohet, selection.method = "vst", nfeatures = 1000,verbose = FALSE,assay = "RNA")
+top20_all.data.filt.nohet <- head(VariableFeatures(all.data.filt.nohet), 20)
+LabelPoints(plot = VariableFeaturePlot(all.data.filt.nohet), points = top20_all.data.filt.nohet, repel = TRUE)
+
+set1.filt <- FindVariableFeatures(set1.filt, selection.method = "vst", nfeatures = 1000,verbose = FALSE,assay = "RNA")
+top20_set1.filt <- head(VariableFeatures(set1.filt), 20)
+LabelPoints(plot = VariableFeaturePlot(set1.filt), points = top20_set1.filt, repel = TRUE)
+
+set2.filt <- FindVariableFeatures(set2.filt, selection.method = "vst", nfeatures = 1000,verbose = FALSE,assay = "RNA")
+top20_set2.filt <- head(VariableFeatures(set2.filt), 20)
+LabelPoints(plot = VariableFeaturePlot(set2.filt), points = top20_set2.filt, repel = TRUE)
+
+set3.filt <- FindVariableFeatures(set3.filt, selection.method = "vst", nfeatures = 1000,verbose = FALSE,assay = "RNA")
+top20_set3.filt <- head(VariableFeatures(set3.filt), 20)
+LabelPoints(plot = VariableFeaturePlot(set3.filt), points = top20_set3.filt, repel = TRUE)
+
+set23.filt <- FindVariableFeatures(set23.filt, selection.method = "vst", nfeatures = 1000,verbose = FALSE,assay = "RNA")
+top20_set23.filt <- head(VariableFeatures(set23.filt), 20)
+LabelPoints(plot = VariableFeaturePlot(set23.filt), points = top20_set23.filt, repel = TRUE)
+
+set23.filt.nohet <- FindVariableFeatures(set23.filt.nohet, selection.method = "vst", nfeatures = 1000,verbose = FALSE,assay = "RNA")
+top20_set23.filt.nohet <- head(VariableFeatures(set23.filt.nohet), 20)
+LabelPoints(plot = VariableFeaturePlot(set23.filt.nohet), points = top20_set23.filt.nohet, repel = TRUE)
+```
+
+### Z-score transformation
+```{r}
+all.data.filt <- ScaleData(all.data.filt, assay = "RNA")
+all.data.filt.nohet <- ScaleData(all.data.filt.nohet, assay = "RNA")
+set1.filt <- ScaleData(set1.filt, assay = "RNA")
+set2.filt <- ScaleData(set2.filt, assay = "RNA")
+set3.filt <- ScaleData(set3.filt, assay = "RNA")
+set23.filt <- ScaleData(set23.filt, assay = "RNA")
+set23.filt.nohet <- ScaleData(set23.filt.nohet, assay = "RNA")
+```
+
+## PCA
+```{r}
+all.data.filt <- RunPCA(all.data.filt, npcs = 50, reduction.name = "PCA_on_RNA", assay = "RNA",verbose = F)
+all.data.filt.nohet <- RunPCA(all.data.filt.nohet, npcs = 50, reduction.name = "PCA_on_RNA", assay = "RNA",verbose = F)
+set1.filt <- RunPCA(set1.filt, npcs = 50, reduction.name = "PCA_on_RNA", assay = "RNA",verbose = F)
+set2.filt <- RunPCA(set2.filt, npcs = 50, reduction.name = "PCA_on_RNA", assay = "RNA",verbose = F)
+set3.filt <- RunPCA(set3.filt, npcs = 50, reduction.name = "PCA_on_RNA", assay = "RNA",verbose = F)
+set23.filt <- RunPCA(set23.filt, npcs = 50, reduction.name = "PCA_on_RNA", assay = "RNA",verbose = F)
+set23.filt.nohet <- RunPCA(set23.filt.nohet, npcs = 50, reduction.name = "PCA_on_RNA", assay = "RNA",verbose = F)
+```
+
+```{r}
+colors = c("blue","blue","blue","red","red","red","grey","grey","grey")
+colors23 = c("blue","blue","red","red","grey","grey")
+colors3 =c("red","blue","darkgreen")
+
+pcaplot = plot_grid(ncol = 3,
+  DimPlot(all.data.filt, reduction = "PCA_on_RNA", group.by = "HTO_classification",dims = 1:2, cols=colors),
+  DimPlot(all.data.filt, reduction = "PCA_on_RNA", group.by = "HTO_classification",dims = 3:4, cols=colors),
+  DimPlot(all.data.filt, reduction = "PCA_on_RNA", group.by = "HTO_classification",dims = 5:6, cols=colors),
+  DimPlot(set1.filt, reduction = "PCA_on_RNA", group.by = "HTO_classification",dims = 1:2, cols=colors3),
+  DimPlot(set1.filt, reduction = "PCA_on_RNA", group.by = "HTO_classification",dims = 3:4, cols=colors3),
+  DimPlot(set1.filt, reduction = "PCA_on_RNA", group.by = "HTO_classification",dims = 5:6, cols=colors3),
+  DimPlot(set2.filt, reduction = "PCA_on_RNA", group.by = "HTO_classification",dims = 1:2, cols=colors3),
+  DimPlot(set2.filt, reduction = "PCA_on_RNA", group.by = "HTO_classification",dims = 3:4, cols=colors3),
+  DimPlot(set2.filt, reduction = "PCA_on_RNA", group.by = "HTO_classification",dims = 5:6, cols=colors3),
+  DimPlot(set3.filt, reduction = "PCA_on_RNA", group.by = "HTO_classification",dims = 1:2, cols=colors3),
+  DimPlot(set3.filt, reduction = "PCA_on_RNA", group.by = "HTO_classification",dims = 3:4, cols=colors3),
+  DimPlot(set3.filt, reduction = "PCA_on_RNA", group.by = "HTO_classification",dims = 5:6, cols=colors3),
+  DimPlot(set23.filt, reduction = "PCA_on_RNA", group.by = "HTO_classification",dims = 1:2, cols=colors23),
+  DimPlot(set23.filt, reduction = "PCA_on_RNA", group.by = "HTO_classification",dims = 3:4, cols=colors23),
+  DimPlot(set23.filt, reduction = "PCA_on_RNA", group.by = "HTO_classification",dims = 5:6, cols=colors23)
+  )
+pcaplot
+```
+
+## UMAP
+```{r}
+all.data.filt <- RunUMAP(all.data.filt, reduction.name = "UMAP10_on_RNA",
+                   reduction = "PCA_on_RNA", 
+                   dims = 1:30,
+                   n.components=10,
+                   n.neighbors=30,
+                   n.epochs=200,
+                   min.dist=0.3,
+                   learning.rate=1,
+                   spread=1 )
+```
+
+```{r}
+all.data.filt.nohet <- RunUMAP(all.data.filt.nohet, reduction.name = "UMAP10_on_RNA",
+                   reduction = "PCA_on_RNA", 
+                   dims = 1:30,
+                   n.components=10,
+                   n.neighbors=30,
+                   n.epochs=200,
+                   min.dist=0.3,
+                   learning.rate=1,
+                   spread=1 )
+```
+
+```{r}
+set1.filt <- RunUMAP(set1.filt, reduction.name = "UMAP10_on_RNA",
+                   reduction = "PCA_on_RNA", 
+                   dims = 1:30,
+                   n.components=10,
+                   n.neighbors=30,
+                   n.epochs=200,
+                   min.dist=0.3,
+                   learning.rate=1,
+                   spread=1 )
+```
+
+```{r}
+set2.filt <- RunUMAP(set2.filt, reduction.name = "UMAP10_on_RNA",
+                   reduction = "PCA_on_RNA", 
+                   dims = 1:30,
+                   n.components=10,
+                   n.neighbors=30,
+                   n.epochs=200,
+                   min.dist=0.3,
+                   learning.rate=1,
+                   spread=1 )
+```
+
+```{r}
+set3.filt <- RunUMAP(set3.filt, reduction.name = "UMAP10_on_RNA",
+                   reduction = "PCA_on_RNA", 
+                   dims = 1:30,
+                   n.components=10,
+                   n.neighbors=30,
+                   n.epochs=200,
+                   min.dist=0.3,
+                   learning.rate=1,
+                   spread=1 )
+```
+
+```{r}
+set23.filt <- RunUMAP(set23.filt, reduction.name = "UMAP10_on_RNA",
+                   reduction = "PCA_on_RNA", 
+                   dims = 1:30,
+                   n.components=10,
+                   n.neighbors=30,
+                   n.epochs=200,
+                   min.dist=0.3,
+                   learning.rate=1,
+                   spread=1 )
+```
+
+```{r}
+set23.filt.nohet <- RunUMAP(set23.filt.nohet, reduction.name = "UMAP10_on_RNA",
+                   reduction = "PCA_on_RNA", 
+                   dims = 1:30,
+                   n.components=10,
+                   n.neighbors=30,
+                   n.epochs=200,
+                   min.dist=0.3,
+                   learning.rate=1,
+                   spread=1 )
+```
+
+#### Plotting of UMAPs with all data
+```{r}
+colors_neg_all = c("grey", "grey", "grey","grey", "grey", "grey","red", "red", "red")
+colors_hom_all = c("grey", "grey", "grey","red", "red", "red","grey", "grey", "grey")
+colors_het_all = c("red", "red", "red","grey", "grey", "grey","grey", "grey", "grey")
+colors_hom = c("grey", "red", "grey")
+colors_het = c("red", "grey", "grey")
+
+g =plot_grid(ncol = 3,
+DimPlot(all.data.filt, reduction = "UMAP10_on_RNA", group.by = "HTO_classification",dims = 1:2,cols=colors) + ggplot2::ggtitle(label ="UMAP on All Data, dim1-2"),
+DimPlot(set1.filt, reduction = "UMAP10_on_RNA", group.by = "HTO_classification",dims = 1:2,cols=colors3) + ggplot2::ggtitle(label ="UMAP on Set1, dim1-2"),
+DimPlot(set2.filt, reduction = "UMAP10_on_RNA", group.by = "HTO_classification",dims = 1:2,cols=colors3) + ggplot2::ggtitle(label ="UMAP on Set2, dim1-2"),
+DimPlot(set3.filt, reduction = "UMAP10_on_RNA", group.by = "HTO_classification",dims = 1:2,cols=colors3) + ggplot2::ggtitle(label ="UMAP on Set3, dim1-2"),
+DimPlot(set23.filt, reduction = "UMAP10_on_RNA", group.by = "HTO_classification",dims = 1:2,cols=colors23) + ggplot2::ggtitle(label ="UMAP on Set23, dim1-2")
+)
+g
+```
+
+```{r}
+g =plot_grid(ncol = 3,
+DimPlot(set23.filt, reduction = "UMAP10_on_RNA", group.by = "HTO_classification",dims = 1:2,cols=colors23) + ggplot2::ggtitle(label ="UMAP on Set23, dim1-2"),
+DimPlot(set23.filt, reduction = "UMAP10_on_RNA", group.by = "HTO_classification",dims = 3:4,cols=colors23) + ggplot2::ggtitle(label ="UMAP on Set23, dim3-4"),
+DimPlot(set23.filt, reduction = "UMAP10_on_RNA", group.by = "HTO_classification",dims = 5:6,cols=colors23) + ggplot2::ggtitle(label ="UMAP on Set23, dim5-6")
+)
+g
+```
+
+```{r}
+pdf("~/Desktop/211123_201205_Fig1A_set23_all.pdf",width=12,height=3,paper='special') 
+g
+dev.off()
+```
+
+### plotting density UMAPs
+```{r}
+p = DimPlot(set23.filt, reduction = "UMAP10_on_RNA", group.by = "HTO_classification",dims = 1:2,cols=colors23) + ggplot2::ggtitle(label ="UMAP on Set23, dim1-2")
+```
+
+```{r}
+ppp = ggplot(p$data, aes(UMAP_1, UMAP_2)) +
+    geom_point(aes(UMAP_1, UMAP_2), size =1) +
+    theme_minimal(base_size = 14) + labs(y="UMAP dim1",x = "UMAP dim2")
+```
+
+
+```{r}
+ppp + geom_density_2d_filled() + geom_density_2d(size = 0.25, colour = "black") + facet_wrap("HTO_classification")
+```
+
+### density UMAP with merged set2 and 3
+```{r}
+#re-order 
+set23.filt_r = set23.filt
+set23.filt_r$HTO_classification = factor(set23.filt_r$HTO_classification, levels = c("neg2","het2","hom2","neg3","het3","hom3"))
+```
+
+```{r}
+Idents(object = set23.filt_r) <- set23.filt_r@meta.data$HTO_classification
+set23.filt_r.rename <- RenameIdents(object = set23.filt_r, 'hom2' = 'hom','hom3' = 'hom','neg2' = 'neg','neg3' = 'neg', 'het2' = 'het','het3' = 'het')
+set23.filt_r.rename@active.ident = factor(set23.filt_r.rename@active.ident, levels = c("neg","het","hom"))
+```
+
+```{r}
+set23.filt_r.rename$act.ident = set23.filt_r.rename@active.ident
+```
+
+
+```{r}
+p = DimPlot(set23.filt_r.rename, reduction = "UMAP10_on_RNA", group.by = "act.ident" ,dims = 1:2,cols=colors23) + ggplot2::ggtitle(label ="UMAP on Set23, dim1-2")
+```
+
+```{r}
+ppp = ggplot(p$data, aes(UMAP_1, UMAP_2)) +
+    geom_point(aes(UMAP_1, UMAP_2), size =1) +
+  theme_minimal(base_size = 14) + labs(y="UMAP dim1",x = "UMAP dim2") + guides(fill=guide_legend(title="# of cells"), colour=guide_legend(title="# of cells", override.aes = list(size=5)))
+```
+
+```{r}
+p3 = ppp + geom_density_2d_filled(alpha = 0.8) + geom_density_2d(size = 0.25, colour = "black") + facet_wrap("act.ident") + 
+    theme(panel.background = element_rect(fill = NA), panel.ontop = TRUE)
+p3
+```
+
+```{r}
+pdf("~/Desktop/211125_set23_merge_UMAP_density.pdf",width=8,height=3,paper='special') 
+p3
+dev.off()
+```
+
+#### Plotting H2D1 together with UMAP:
+```{r}
+#The special column with H2D1 expression info is converted to numeric values
+set23.filt$h2d1norm=as.numeric(set23.filt$h2d1norm)
+set23.filt.nohet$h2d1norm=as.numeric(set23.filt.nohet$h2d1norm)
+
+set1.filt$h2d1norm=as.numeric(set1.filt$h2d1norm)
+set2.filt$h2d1norm=as.numeric(set2.filt$h2d1norm)
+set3.filt$h2d1norm=as.numeric(set3.filt$h2d1norm)
+all.data.filt$h2d1norm=as.numeric(all.data.filt$h2d1norm)
+all.data.filt.nohet$h2d1norm=as.numeric(all.data.filt.nohet$h2d1norm)
+```
+
+```{r, fig.height=3, fig.width=12}
+h2fp = plot_grid(ncol = 3,
+FeaturePlot(all.data.filt, reduction = "UMAP10_on_RNA",dims = 1:2, features = "h2d1norm"),
+FeaturePlot(all.data.filt.nohet, reduction = "UMAP10_on_RNA",dims = 1:2, features = "h2d1norm")
+)
+h2fp
+```
+
+```{r}
+pdf("~/Desktop/201205_UMAP_H2D1_set123_all_nohet.pdf",width=12,height=3,paper='special') 
+h2fp
+dev.off()
+```
+
+```{r, fig.height=3, fig.width=12}
+h2fp2 = plot_grid(ncol = 3,
+FeaturePlot(set23.filt, reduction = "UMAP10_on_RNA",dims = 1:2, features = "h2d1norm"),
+FeaturePlot(set23.filt.nohet, reduction = "UMAP10_on_RNA",dims = 1:2, features = "h2d1norm")
+)
+h2fp2
+```
+
+```{r}
+pdf("~/Desktop/201205_Fig1B_UMAP_H2D1_set23_all_nohet.pdf",width=12,height=3,paper='special') 
+h2fp2
+dev.off()
+```
+
+***
+# DEG analysis
+```{r}
+set23.DEG = set23.filt
+Idents(object = set23.DEG) <- set23.DEG@meta.data$HTO_classification
+set23.DEG <- RenameIdents(object = set23.DEG, 'het2' = 'het','het3' = 'het','hom2' = 'hom','hom3' = 'hom','neg2' = 'neg','neg3' = 'neg')
+table(set23.DEG@active.ident)
+```
+
+```{r}
+set23.filt.DEG.neg.hom <- FindMarkers(set23.DEG,
+                               ident.1 = "neg", 
+                               ident.2 = "hom",
+                               logfc.threshold = 0,
+                               test.use = "wilcox",
+                               min.pct = 0.1,
+                               only.pos = FALSE,
+                               min.cells.group = 10,
+                               min.cells.feature = 10,
+                               pseudocount.use = 1,
+                               assay = "RNA")
+
+set23.filt.DEG.neg.het <- FindMarkers(set23.DEG,
+                               ident.1 = "neg", 
+                               ident.2 = "het",
+                               logfc.threshold = 0,
+                               test.use = "wilcox",
+                               min.pct = 0.1,
+                               only.pos = FALSE,
+                               min.cells.group = 10,
+                               min.cells.feature = 10,
+                               pseudocount.use = 1,
+                               assay = "RNA")
+
+set23.filt.DEG.het.hom <- FindMarkers(set23.DEG,
+                               ident.1 = "het", 
+                               ident.2 = "hom",
+                               logfc.threshold = 0,
+                               test.use = "wilcox",
+                               min.pct = 0.1,
+                               only.pos = FALSE,
+                               min.cells.group = 10,
+                               min.cells.feature = 10,
+                               pseudocount.use = 1,
+                               assay = "RNA")
+```
+
+```{r}
+set23.filt.DEG.neg.hom_sub = subset(set23.filt.DEG.neg.hom, abs(avg_logFC)>log2(1.2) & p_val<0.05)
+
+vp.set23.filt.DEG.neg.hom = ggplot(set23.filt.DEG.neg.hom) +
+  geom_point(
+      data = set23.filt.DEG.neg.hom,
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "grey",
+      cex = 1
+    ) +
+  geom_point(
+      data = subset(set23.filt.DEG.neg.hom, abs(avg_logFC)>log2(1.2) & p_val<0.05),
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "red",
+      cex = 1
+    ) +
+  geom_text_repel(
+      data = set23.filt.DEG.neg.hom_sub,
+      aes(x = avg_logFC, y = -log10(p_val), label=rownames(set23.filt.DEG.neg.hom_sub)),
+      size = 2,
+      min.segment.length = unit(0, 'lines'),
+      box.padding = unit(0.35, "lines"),
+      point.padding = unit(0.3, "lines")
+    ) +
+    theme_bw(base_size = 14) +
+    ggtitle("set23 (neg vs hom)")
+
+vp.set23.filt.DEG.neg.hom
+```
+```{r}
+set23.filt.DEG.neg.het_sub = subset(set23.filt.DEG.neg.het, abs(avg_logFC)>log2(1.2) & p_val<0.05)
+
+vp.set23.filt.DEG.neg.het = ggplot(set23.filt.DEG.neg.het) +
+  geom_point(
+      data = set23.filt.DEG.neg.het,
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "grey",
+      cex = 1
+    ) +
+  geom_point(
+      data = subset(set23.filt.DEG.neg.het, abs(avg_logFC)>log2(1.2) & p_val<0.05),
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "red",
+      cex = 1
+    ) +
+  geom_text_repel(
+      data = set23.filt.DEG.neg.het_sub,
+      aes(x = avg_logFC, y = -log10(p_val), label=rownames(set23.filt.DEG.neg.het_sub)),
+      size = 2,
+      min.segment.length = unit(0, 'lines'),
+      box.padding = unit(0.35, "lines"),
+      point.padding = unit(0.3, "lines")
+    ) +
+    theme_bw(base_size = 14) +
+    ggtitle("set23 (neg vs het)")
+
+vp.set23.filt.DEG.neg.het
+```
+
+```{r}
+set23.filt.DEG.het.hom_sub = subset(set23.filt.DEG.het.hom, abs(avg_logFC)>log2(1.2) & p_val<0.05)
+
+vp.set23.filt.DEG.het.hom = ggplot(set23.filt.DEG.het.hom) +
+  geom_point(
+      data = set23.filt.DEG.het.hom,
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "grey",
+      cex = 1
+    ) +
+  geom_point(
+      data = subset(set23.filt.DEG.het.hom, abs(avg_logFC)>log2(1.2) & p_val<0.05),
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "red",
+      cex = 1
+    ) +
+  geom_text_repel(
+      data = set23.filt.DEG.het.hom_sub,
+      aes(x = avg_logFC, y = -log10(p_val), label=rownames(set23.filt.DEG.het.hom_sub)),
+      size = 2,
+      min.segment.length = unit(0, 'lines'),
+      box.padding = unit(0.35, "lines"),
+      point.padding = unit(0.3, "lines")
+    ) +
+    theme_bw(base_size = 14) +
+    ggtitle("set23 (het vs hom)")
+
+vp.set23.filt.DEG.het.hom
+```
+
+```{r}
+dd2 =plot_grid(ncol = 3,
+             vp.set23.filt.DEG.neg.hom,
+             vp.set23.filt.DEG.neg.het,
+             vp.set23.filt.DEG.het.hom
+)
+             
+dd2           
+```
+
+
+```{r}
+#write results to file
+write.table(as.matrix(set23.filt.DEG.neg.hom),file="~/Desktop/200910_set23dividedBefore.filt.DEG.neg.hom.wilcox.txt",sep="\t")
+write.table(as.matrix(set23.filt.DEG.neg.het),file="~/Desktop/200910_set23dividedBefore.filt.DEG.neg.het.wilcox.txt",sep="\t")
+write.table(as.matrix(set23.filt.DEG.het.hom),file="~/Desktop/200910_set23dividedBefore.filt.DEG.het.hom.wilcox.txt",sep="\t")
+```
+
+***
+# GO and KEGG analysis
+
+#### Re-load the previously produced DEG lists
+```{r}
+set23.filt.DEG.neg.hom=read.delim("~/Desktop/NK_scRNA_input/200910_set23dividedBefore.filt.DEG.neg.hom.wilcox.txt",sep="\t", row.names = 1)
+set23.filt.DEG.neg.het=read.delim("~/Desktop/NK_scRNA_input/200910_set23dividedBefore.filt.DEG.neg.het.wilcox.txt",sep="\t", row.names = 1)
+set23.filt.DEG.het.hom=read.delim("~/Desktop/NK_scRNA_input/200910_set23dividedBefore.filt.DEG.het.hom.wilcox.txt",sep="\t", row.names = 1)
+```
+
+####select genes to use for GO and KEGG analysis
+```{r}
+#search replace to change between sets! set1, set2, set3, set23, all.data
+
+set23.filt.DEG.neg.hom_sig = set23.filt.DEG.neg.hom[set23.filt.DEG.neg.hom$p_val_adj<0.05,]
+set23.filt.DEG.neg.het_sig = set23.filt.DEG.neg.het[set23.filt.DEG.neg.het$p_val_adj<0.05,]
+set23.filt.DEG.het.hom_sig = set23.filt.DEG.het.hom[set23.filt.DEG.het.hom$p_val_adj<0.05,]
+  
+nrow(set23.filt.DEG.neg.hom_sig)
+nrow(set23.filt.DEG.neg.het_sig)
+nrow(set23.filt.DEG.het.hom_sig)
+```
+
+#### Biological Process GO analysis
+```{r}
+set23.filt.DEG.neg.hom_sig_BP <- enrichGO(gene = rownames(set23.filt.DEG.neg.hom_sig),
+                keyType       = 'SYMBOL',
+                OrgDb         = org.Mm.eg.db,
+                ont           = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05,
+                minGSSize     = 3,
+                readable      = FALSE) #set to true if not using SYMBOL
+head(summary(set23.filt.DEG.neg.hom_sig_BP))
+
+set23.filt.DEG.neg.het_sig_BP <- enrichGO(gene = rownames(set23.filt.DEG.neg.het_sig),
+                keyType       = 'SYMBOL',
+                OrgDb         = org.Mm.eg.db,
+                ont           = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05,
+                minGSSize     = 3,
+                readable      = FALSE) #set to true if not using SYMBOL
+head(summary(set23.filt.DEG.neg.het_sig_BP))
+
+set23.filt.DEG.het.hom_sig_BP <- enrichGO(gene = rownames(set23.filt.DEG.het.hom_sig),
+                keyType       = 'SYMBOL',
+                OrgDb         = org.Mm.eg.db,
+                ont           = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05,
+                minGSSize     = 3,
+                readable      = FALSE) #set to true if not using SYMBOL
+head(summary(set23.filt.DEG.het.hom_sig_BP))
+```
+```{r}
+#Plot top 15 BPs as dotplots
+dotplot(set23.filt.DEG.neg.hom_sig_BP, showCategory=15)
+dotplot(set23.filt.DEG.neg.het_sig_BP, showCategory=15)
+dotplot(set23.filt.DEG.het.hom_sig_BP, showCategory=15)
+```
+
+```{r}
+#Plot top 5 BPs as a cnetplot (GO terms are in brown bubbles, and gene names are in grey bubbles)
+cnetplot(set23.filt.DEG.neg.hom_sig_BP, 5)
+cnetplot(set23.filt.DEG.neg.het_sig_BP, 5)
+cnetplot(set23.filt.DEG.het.hom_sig_BP, 5)
+```
+
+```{r}
+##write the analysis results to file:
+write.table(as.matrix(summary(set23.filt.DEG.neg.hom_sig_BP)),file="~/Desktop/201014_set23.filt.DEG.neg.hom_sig_BP.txt",sep="\t")
+write.table(as.matrix(summary(set23.filt.DEG.neg.het_sig_BP)),file="~/Desktop/201014_set23.filt.DEG.neg.het_sig_BP.txt",sep="\t")
+write.table(as.matrix(summary(set23.filt.DEG.het.hom_sig_BP)),file="~/Desktop/201014_set23.filt.DEG.het.hom_sig_BP.txt",sep="\t")
+```
+
+#### Beautify BP plots
+```{r}
+#re-load data
+set23.filt.DEG.neg.hom_sig_BP = read.delim("~/Desktop/201014_set23.filt.DEG.neg.hom_sig_BP.txt")
+set23.filt.DEG.neg.het_sig_BP = read.delim("~/Desktop/201014_set23.filt.DEG.neg.het_sig_BP.txt")
+set23.filt.DEG.het.hom_sig_BP = read.delim("~/Desktop/201014_set23.filt.DEG.het.hom_sig_BP.txt")
+```
+
+```{r}
+#add column for decimal number of GeneRatio
+set23.filt.DEG.neg.hom_sig_BP = separate(data = set23.filt.DEG.neg.hom_sig_BP, col = GeneRatio, into = c("left", "right"), sep = "/")
+
+set23.filt.DEG.neg.hom_sig_BP$GeneRatio_decimal = (
+   as.numeric(set23.filt.DEG.neg.hom_sig_BP$left)/as.numeric(set23.filt.DEG.neg.hom_sig_BP$right))
+
+set23.filt.DEG.neg.het_sig_BP = separate(data = set23.filt.DEG.neg.het_sig_BP, col = GeneRatio, into = c("left", "right"), sep = "/")
+
+set23.filt.DEG.neg.het_sig_BP$GeneRatio_decimal = (
+   as.numeric(set23.filt.DEG.neg.het_sig_BP$left)/as.numeric(set23.filt.DEG.neg.het_sig_BP$right))
+
+set23.filt.DEG.het.hom_sig_BP = separate(data = set23.filt.DEG.het.hom_sig_BP, col = GeneRatio, into = c("left", "right"), sep = "/")
+
+set23.filt.DEG.het.hom_sig_BP$GeneRatio_decimal = (
+   as.numeric(set23.filt.DEG.het.hom_sig_BP$left)/as.numeric(set23.filt.DEG.het.hom_sig_BP$right))
+```
+
+```{r}
+y <- as.data.frame(set23.filt.DEG.neg.hom_sig_BP)
+head(y)
+y$Description <- factor(y$Description, levels = y$Description[rev(order(y$p.adjust))])
+y = y[0:15,]
+gg1 = ggplot(y,
+      aes(x = 1, y = Description)) + 
+      geom_point(aes(size = Count, color = p.adjust))+# color = "black", pch = 21) +
+      theme_bw(base_size = 14) +
+      scale_colour_gradient(low = "darkgreen", high="white", guide = guide_colorbar(frame.colour = "black", ticks.colour = "black")) +
+      geom_point(aes(size = Count), color = "black", pch = 21) +
+      ylab(NULL) +
+      xlab(NULL) +
+      scale_x_discrete(expand=c(0,0))  +
+      guides(size = guide_legend(order = 1)) +
+      labs(size = "genes", color = "p value") +
+      theme(axis.title.x=element_blank(), axis.text.x=element_blank(), axis.ticks.x=element_blank()) +
+      ggtitle("set23.filt.DEG.neg.hom_sig_BP") +
+      theme(plot.title = element_text(hjust=1))
+gg1
+```
+
+```{r}
+pdf("~/Desktop/211124_set23.filt.DEG.neg.hom_sig_BP_top15_padj.pdf",width=5.2,height=3.7,paper='special') 
+gg1
+dev.off()
+```
+
+#### Molecular Function GO analysis
+```{r}
+set23.filt.DEG.neg.hom_sig_MF <- enrichGO(gene = rownames(set23.filt.DEG.neg.hom_sig),
+                keyType       = 'SYMBOL',
+                OrgDb         = org.Mm.eg.db,
+                ont           = "MF",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05,
+                minGSSize     = 3,
+                readable      = FALSE) #set to true if not using SYMBOL
+head(summary(set23.filt.DEG.neg.hom_sig_MF))
+
+set23.filt.DEG.neg.het_sig_MF <- enrichGO(gene = rownames(set23.filt.DEG.neg.het_sig),
+                keyType       = 'SYMBOL',
+                OrgDb         = org.Mm.eg.db,
+                ont           = "MF",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05,
+                minGSSize     = 3,
+                readable      = FALSE) #set to true if not using SYMBOL
+head(summary(set23.filt.DEG.neg.het_sig_MF))
+
+set23.filt.DEG.het.hom_sig_MF <- enrichGO(gene = rownames(set23.filt.DEG.het.hom_sig),
+                keyType       = 'SYMBOL',
+                OrgDb         = org.Mm.eg.db,
+                ont           = "MF",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05,
+                minGSSize     = 3,
+                readable      = FALSE) #set to true if not using SYMBOL
+head(summary(set23.filt.DEG.het.hom_sig_MF))
+```
+
+```{r}
+#Plot top 15 MFs as dotplots
+dotplot(set23.filt.DEG.neg.hom_sig_MF, showCategory=15)
+dotplot(set23.filt.DEG.neg.het_sig_MF, showCategory=15)
+dotplot(set23.filt.DEG.het.hom_sig_MF, showCategory=15)
+```
+
+```{r}
+#Plot top 5 MFs as a cnetplot (GO terms are in brown bubbles, and gene names are in grey bubbles)
+cnetplot(set23.filt.DEG.neg.hom_sig_MF, 5)
+cnetplot(set23.filt.DEG.neg.het_sig_MF, 5)
+cnetplot(set23.filt.DEG.het.hom_sig_MF, 5)
+```
+
+```{r}
+##write the analysis results to file:
+write.table(as.matrix(summary(set23.filt.DEG.neg.hom_sig_MF)),file="~/Desktop/201014_set23.filt.DEG.neg.hom_sig_MF.txt",sep="\t")
+write.table(as.matrix(summary(set23.filt.DEG.neg.het_sig_MF)),file="~/Desktop/201014_set23.filt.DEG.neg.het_sig_MF.txt",sep="\t")
+write.table(as.matrix(summary(set23.filt.DEG.het.hom_sig_MF)),file="~/Desktop/201014_set23.filt.DEG.het.hom_sig_MF.txt",sep="\t")
+```
+
+
+#### KEGG analysis
+```{r}
+#First change the gene IDs from ENSEMBL to ENTREZ:
+set23.filt.DEG.neg.hom_sig.entrez = bitr(rownames(set23.filt.DEG.neg.hom_sig), 
+        fromType = "SYMBOL",
+        toType = c("ENTREZID"),
+        OrgDb = org.Mm.eg.db)
+
+set23.filt.DEG.neg.het_sig.entrez = bitr(rownames(set23.filt.DEG.neg.het_sig), 
+        fromType = "SYMBOL",
+        toType = c("ENTREZID"),
+        OrgDb = org.Mm.eg.db)
+
+set23.filt.DEG.het.hom_sig.entrez = bitr(rownames(set23.filt.DEG.het.hom_sig), 
+        fromType = "SYMBOL",
+        toType = c("ENTREZID"),
+        OrgDb = org.Mm.eg.db)
+```
+
+```{r}
+#Then perform the KEGG analysis
+set23.filt.DEG.neg.hom_sig_KEGG = enrichKEGG(
+      gene = set23.filt.DEG.neg.hom_sig.entrez$ENTREZID,
+      organism     = 'mmu',
+      pvalueCutoff = 0.05,
+      pAdjustMethod = "BH",
+      minGSSize = 3
+)
+head(set23.filt.DEG.neg.hom_sig_KEGG)
+
+set23.filt.DEG.neg.het_sig_KEGG = enrichKEGG(
+      gene = set23.filt.DEG.neg.het_sig.entrez$ENTREZID,
+      organism     = 'mmu',
+      pvalueCutoff = 0.05,
+      pAdjustMethod = "BH",
+      minGSSize = 3
+)
+head(set23.filt.DEG.neg.het_sig_KEGG)
+
+set23.filt.DEG.het.hom_sig_KEGG = enrichKEGG(
+      gene = set23.filt.DEG.het.hom_sig.entrez$ENTREZID,
+      organism     = 'mmu',
+      pvalueCutoff = 0.05,
+      pAdjustMethod = "BH",
+      minGSSize = 3
+)
+head(set23.filt.DEG.het.hom_sig_KEGG)
+```
+
+```{r}
+#Plot top 15 KEGGs as dotplots
+dotplot(set23.filt.DEG.neg.hom_sig_KEGG, showCategory=15)
+dotplot(set23.filt.DEG.neg.het_sig_KEGG, showCategory=15)
+dotplot(set23.filt.DEG.het.hom_sig_KEGG, showCategory=15)
+```
+
+```{r}
+#Plot top 5 KEGGs as a cnetplot (GO terms are in brown bubbles, and gene names are in grey bubbles)
+cnetplot(set23.filt.DEG.neg.hom_sig_KEGG, 5)
+cnetplot(set23.filt.DEG.neg.het_sig_KEGG, 5)
+cnetplot(set23.filt.DEG.het.hom_sig_KEGG, 5)
+```
+
+```{r}
+##write the analysis results to file:
+write.table(as.matrix(summary(set23.filt.DEG.neg.hom_sig_KEGG)),file="~/Desktop/201014_set23.filt.DEG.neg.hom_sig_KEGG.txt",sep="\t")
+write.table(as.matrix(summary(set23.filt.DEG.neg.het_sig_KEGG)),file="~/Desktop/201014_set23.filt.DEG.neg.het_sig_KEGG.txt",sep="\t")
+write.table(as.matrix(summary(set23.filt.DEG.het.hom_sig_KEGG)),file="~/Desktop/201014_set23.filt.DEG.het.hom_sig_KEGG.txt",sep="\t")
+```
+
+***
+# Division into Cd11b-Cd27 subsets
+#### CD11b boxplot
+
+```{r}
+colors = c("red3","red","pink1","darkblue","blue","lightblue","darkgreen","green","lightgreen")
+features <- c("Itgam")
+RidgePlot(all.data.mtr.XY.filt, features = features, ncol = 2, group.by = "HTO_classification", cols=colors)
+VlnPlot(all.data.mtr.XY.filt, features = features, group.by = "HTO_classification", cols=colors)
+```
+
+#### CD27 boxplot
+```{r}
+colors = c("red3","red","pink1","darkblue","blue","lightblue","darkgreen","green","lightgreen")
+features <- c("Cd27")
+RidgePlot(all.data.mtr.XY.filt, features = features, ncol = 2, group.by = "HTO_classification", cols=colors)
+VlnPlot(all.data.mtr.XY.filt, features = features, group.by = "HTO_classification", cols=colors)
+
+```
+
+#### Divide into Cd11/Cd27 subsets
+```{r}
+set23.mtr.XY.filt.11hi27hi = subset(set23.mtr.XY.filt, Itgam > 0.5)
+set23.mtr.XY.filt.11hi27hi = subset(set23.mtr.XY.filt.11hi27hi, Cd27 > 0.5)
+
+set23.mtr.XY.filt.11hi27lo = subset(set23.mtr.XY.filt, Itgam > 0.5)
+set23.mtr.XY.filt.11hi27lo = subset(set23.mtr.XY.filt.11hi27lo, Cd27 < 0.5)
+
+set23.mtr.XY.filt.11lo27hi = subset(set23.mtr.XY.filt, Itgam < 0.5)
+set23.mtr.XY.filt.11lo27hi = subset(set23.mtr.XY.filt.11lo27hi, Cd27 > 0.5)
+
+set23.mtr.XY.filt.11lo27lo = subset(set23.mtr.XY.filt, Itgam < 0.5)
+set23.mtr.XY.filt.11lo27lo = subset(set23.mtr.XY.filt.11lo27lo, Cd27 < 0.5)
+```
+
+#### Recombine, with a column with activation status
+```{r}
+set23.filt.subset = merge(set23.mtr.XY.filt.11hi27hi, c(set23.mtr.XY.filt.11hi27lo, set23.mtr.XY.filt.11lo27hi,set23.mtr.XY.filt.11lo27lo), add.cell.ids=c("11hi27hi","11hi27lo", "11lo27hi", "11lo27lo"))
+set23.filt.subset$activation = rownames(set23.filt.subset@meta.data)
+set23.filt.subset$activation = gsub("\\_[0-9,A-Z,a-z,-]*","",set23.filt.subset$activation)
+set23.filt.subset$activation = as.factor(set23.filt.subset$activation)
+```
+
+#### feature selection
+```{r}
+set23.mtr.XY.filt.11hi27hi <- FindVariableFeatures(set23.mtr.XY.filt.11hi27hi, selection.method = "vst", nfeatures = 1000,verbose = FALSE,assay = "RNA")
+top20_set23.mtr.XY.filt.11hi27hi <- head(VariableFeatures(set23.mtr.XY.filt.11hi27hi), 20)
+LabelPoints(plot = VariableFeaturePlot(set23.mtr.XY.filt.11hi27hi), points = top20_set23.mtr.XY.filt.11hi27hi, repel = TRUE)
+
+set23.mtr.XY.filt.11hi27lo <- FindVariableFeatures(set23.mtr.XY.filt.11hi27lo, selection.method = "vst", nfeatures = 1000,verbose = FALSE,assay = "RNA")
+top20_set23.mtr.XY.filt.11hi27lo <- head(VariableFeatures(set23.mtr.XY.filt.11hi27lo), 20)
+LabelPoints(plot = VariableFeaturePlot(set23.mtr.XY.filt.11hi27lo), points = top20_set23.mtr.XY.filt.11hi27lo, repel = TRUE)
+
+set23.mtr.XY.filt.11lo27hi <- FindVariableFeatures(set23.mtr.XY.filt.11lo27hi, selection.method = "vst", nfeatures = 1000,verbose = FALSE,assay = "RNA")
+top20_set23.mtr.XY.filt.11lo27hi <- head(VariableFeatures(set23.mtr.XY.filt.11lo27hi), 20)
+LabelPoints(plot = VariableFeaturePlot(set23.mtr.XY.filt.11lo27hi), points = top20_set23.mtr.XY.filt.11lo27hi, repel = TRUE)
+
+set23.mtr.XY.filt.11lo27lo <- FindVariableFeatures(set23.mtr.XY.filt.11lo27lo, selection.method = "vst", nfeatures = 1000,verbose = FALSE,assay = "RNA")
+top20_set23.mtr.XY.filt.11lo27lo <- head(VariableFeatures(set23.mtr.XY.filt.11lo27lo), 20)
+LabelPoints(plot = VariableFeaturePlot(set23.mtr.XY.filt.11lo27lo), points = top20_set23.mtr.XY.filt.11lo27lo, repel = TRUE)
+```
+
+#### Scale data
+```{r}
+set23.mtr.XY.filt.11hi27hi <- ScaleData(set23.mtr.XY.filt.11hi27hi, assay = "RNA")
+set23.mtr.XY.filt.11hi27lo <- ScaleData(set23.mtr.XY.filt.11hi27lo, assay = "RNA")
+set23.mtr.XY.filt.11lo27hi <- ScaleData(set23.mtr.XY.filt.11lo27hi, assay = "RNA")
+set23.mtr.XY.filt.11lo27lo <- ScaleData(set23.mtr.XY.filt.11lo27lo, assay = "RNA")
+```
+
+#### PCA
+```{r}
+set23.mtr.XY.filt.11hi27hi <- RunPCA(set23.mtr.XY.filt.11hi27hi, npcs = 50, reduction.name = "PCA_on_RNA", assay = "RNA",verbose = F)
+set23.mtr.XY.filt.11hi27lo <- RunPCA(set23.mtr.XY.filt.11hi27lo, npcs = 50, reduction.name = "PCA_on_RNA", assay = "RNA",verbose = F)
+set23.mtr.XY.filt.11lo27hi <- RunPCA(set23.mtr.XY.filt.11lo27hi, npcs = 50, reduction.name = "PCA_on_RNA", assay = "RNA",verbose = F)
+set23.mtr.XY.filt.11lo27lo <- RunPCA(set23.mtr.XY.filt.11lo27lo, npcs = 50, reduction.name = "PCA_on_RNA", assay = "RNA",verbose = F)
+```
+
+
+
+#### UMAP on PCA
+```{r}
+set23.mtr.XY.filt.11hi27hi <- RunUMAP(set23.mtr.XY.filt.11hi27hi, reduction.name = "UMAP10_on_RNA",
+                   reduction = "PCA_on_RNA", 
+                   dims = 1:30,
+                   n.components=10,
+                   n.neighbors=30,
+                   n.epochs=200,
+                   min.dist=0.3,
+                   learning.rate=1,
+                   spread=1 )
+```
+
+```{r}
+set23.mtr.XY.filt.11hi27lo <- RunUMAP(set23.mtr.XY.filt.11hi27lo, reduction.name = "UMAP10_on_RNA",
+                   reduction = "PCA_on_RNA", 
+                   dims = 1:30,
+                   n.components=10,
+                   n.neighbors=30,
+                   n.epochs=200,
+                   min.dist=0.3,
+                   learning.rate=1,
+                   spread=1 )
+```
+
+```{r}
+set23.mtr.XY.filt.11lo27hi <- RunUMAP(set23.mtr.XY.filt.11lo27hi, reduction.name = "UMAP10_on_RNA",
+                   reduction = "PCA_on_RNA", 
+                   dims = 1:30,
+                   n.components=10,
+                   n.neighbors=30,
+                   n.epochs=200,
+                   min.dist=0.3,
+                   learning.rate=1,
+                   spread=1 )
+```
+
+```{r}
+set23.mtr.XY.filt.11lo27lo <- RunUMAP(set23.mtr.XY.filt.11lo27lo, reduction.name = "UMAP10_on_RNA",
+                   reduction = "PCA_on_RNA", 
+                   dims = 1:30,
+                   n.components=10,
+                   n.neighbors=30,
+                   n.epochs=200,
+                   min.dist=0.3,
+                   learning.rate=1,
+                   spread=1 )
+```
+
+
+# DEG analysis
+```{r}
+#Renaming the total dataset HTOs
+Idents(object = set23.mtr.XY.filt.11hi27hi) <- set23.mtr.XY.filt.11hi27hi@meta.data$HTO_classification
+set23.mtr.XY.filt.11hi27hi <- RenameIdents(object = set23.mtr.XY.filt.11hi27hi, 'het2' = 'het','het3' = 'het','hom2' = 'hom','hom3' = 'hom','neg2' = 'neg','neg3' = 'neg')
+table(set23.mtr.XY.filt.11hi27hi@active.ident)
+```
+
+```{r}
+set23.mtr.XY.filt.11hi27hi.DEG.neg.hom <- FindMarkers(set23.mtr.XY.filt.11hi27hi,
+                               ident.1 = "neg", 
+                               ident.2 = "hom",
+                               logfc.threshold = 0,
+                               test.use = "wilcox",
+                               min.pct = 0.1,
+                               only.pos = FALSE,
+                               min.cells.group = 10,
+                               min.cells.feature = 10,
+                               pseudocount.use = 1,
+                               assay = "RNA")
+
+set23.mtr.XY.filt.11hi27hi.DEG.neg.het <- FindMarkers(set23.mtr.XY.filt.11hi27hi,
+                               ident.1 = "neg", 
+                               ident.2 = "het",
+                               logfc.threshold = 0,
+                               test.use = "wilcox",
+                               min.pct = 0.1,
+                               only.pos = FALSE,
+                               min.cells.group = 10,
+                               min.cells.feature = 10,
+                               pseudocount.use = 1,
+                               assay = "RNA")
+
+set23.mtr.XY.filt.11hi27hi.DEG.het.hom <- FindMarkers(set23.mtr.XY.filt.11hi27hi,
+                               ident.1 = "het", 
+                               ident.2 = "hom",
+                               logfc.threshold = 0,
+                               test.use = "wilcox",
+                               min.pct = 0.1,
+                               only.pos = FALSE,
+                               min.cells.group = 10,
+                               min.cells.feature = 10,
+                               pseudocount.use = 1,
+                               assay = "RNA")
+```
+
+
+```{r}
+set23.mtr.XY.filt.11hi27hi.DEG.neg.hom_sub = subset(set23.mtr.XY.filt.11hi27hi.DEG.neg.hom, abs(avg_logFC)>log2(1.2) & p_val<0.05)
+
+vp.set23.mtr.XY.filt.11hi27hi.DEG.neg.hom = ggplot(set23.mtr.XY.filt.11hi27hi.DEG.neg.hom) +
+  geom_point(
+      data = set23.mtr.XY.filt.11hi27hi.DEG.neg.hom,
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "grey",
+      cex = 1
+    ) +
+  geom_point(
+      data = subset(set23.mtr.XY.filt.11hi27hi.DEG.neg.hom, abs(avg_logFC)>log2(1.2) & p_val<0.05),
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "red",
+      cex = 1
+    ) +
+  geom_text_repel(
+      data = set23.mtr.XY.filt.11hi27hi.DEG.neg.hom_sub,
+      aes(x = avg_logFC, y = -log10(p_val), label=rownames(set23.mtr.XY.filt.11hi27hi.DEG.neg.hom_sub)),
+      size = 2,
+      min.segment.length = unit(0, 'lines'),
+      box.padding = unit(0.35, "lines"),
+      point.padding = unit(0.3, "lines")
+    ) +
+    theme_bw(base_size = 14) +
+    ggtitle("set23 (neg vs hom)")
+
+vp.set23.mtr.XY.filt.11hi27hi.DEG.neg.hom
+```
+```{r}
+set23.mtr.XY.filt.11hi27hi.DEG.neg.het_sub = subset(set23.mtr.XY.filt.11hi27hi.DEG.neg.het, abs(avg_logFC)>log2(1.2) & p_val<0.05)
+
+vp.set23.mtr.XY.filt.11hi27hi.DEG.neg.het = ggplot(set23.mtr.XY.filt.11hi27hi.DEG.neg.het) +
+  geom_point(
+      data = set23.mtr.XY.filt.11hi27hi.DEG.neg.het,
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "grey",
+      cex = 1
+    ) +
+  geom_point(
+      data = subset(set23.mtr.XY.filt.11hi27hi.DEG.neg.het, abs(avg_logFC)>log2(1.2) & p_val<0.05),
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "red",
+      cex = 1
+    ) +
+  geom_text_repel(
+      data = set23.mtr.XY.filt.11hi27hi.DEG.neg.het_sub,
+      aes(x = avg_logFC, y = -log10(p_val), label=rownames(set23.mtr.XY.filt.11hi27hi.DEG.neg.het_sub)),
+      size = 2,
+      min.segment.length = unit(0, 'lines'),
+      box.padding = unit(0.35, "lines"),
+      point.padding = unit(0.3, "lines")
+    ) +
+    theme_bw(base_size = 14) +
+    ggtitle("set23 (neg vs het)")
+
+vp.set23.mtr.XY.filt.11hi27hi.DEG.neg.het
+```
+
+```{r}
+set23.mtr.XY.filt.11hi27hi.DEG.het.hom_sub = subset(set23.mtr.XY.filt.11hi27hi.DEG.het.hom, abs(avg_logFC)>log2(1.2) & p_val<0.05)
+
+vp.set23.mtr.XY.filt.11hi27hi.DEG.het.hom = ggplot(set23.mtr.XY.filt.11hi27hi.DEG.het.hom) +
+  geom_point(
+      data = set23.mtr.XY.filt.11hi27hi.DEG.het.hom,
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "grey",
+      cex = 1
+    ) +
+  geom_point(
+      data = subset(set23.mtr.XY.filt.11hi27hi.DEG.het.hom, abs(avg_logFC)>log2(1.2) & p_val<0.05),
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "red",
+      cex = 1
+    ) +
+  geom_text_repel(
+      data = set23.mtr.XY.filt.11hi27hi.DEG.het.hom_sub,
+      aes(x = avg_logFC, y = -log10(p_val), label=rownames(set23.mtr.XY.filt.11hi27hi.DEG.het.hom_sub)),
+      size = 2,
+      min.segment.length = unit(0, 'lines'),
+      box.padding = unit(0.35, "lines"),
+      point.padding = unit(0.3, "lines")
+    ) +
+    theme_bw(base_size = 14) +
+    ggtitle("set23 (het vs hom)")
+
+vp.set23.mtr.XY.filt.11hi27hi.DEG.het.hom
+```
+
+
+```{r}
+#Renaming the total dataset HTOs
+Idents(object = set23.mtr.XY.filt.11hi27lo) <- set23.mtr.XY.filt.11hi27lo@meta.data$HTO_classification
+set23.mtr.XY.filt.11hi27lo <- RenameIdents(object = set23.mtr.XY.filt.11hi27lo, 'het2' = 'het','het3' = 'het','hom2' = 'hom','hom3' = 'hom','neg2' = 'neg','neg3' = 'neg')
+table(set23.mtr.XY.filt.11hi27lo@active.ident)
+```
+
+```{r}
+set23.mtr.XY.filt.11hi27lo.DEG.neg.hom <- FindMarkers(set23.mtr.XY.filt.11hi27lo,
+                               ident.1 = "neg", 
+                               ident.2 = "hom",
+                               logfc.threshold = 0,
+                               test.use = "wilcox",
+                               min.pct = 0.1,
+                               only.pos = FALSE,
+                               min.cells.group = 10,
+                               min.cells.feature = 10,
+                               pseudocount.use = 1,
+                               assay = "RNA")
+
+set23.mtr.XY.filt.11hi27lo.DEG.neg.het <- FindMarkers(set23.mtr.XY.filt.11hi27lo,
+                               ident.1 = "neg", 
+                               ident.2 = "het",
+                               logfc.threshold = 0,
+                               test.use = "wilcox",
+                               min.pct = 0.1,
+                               only.pos = FALSE,
+                               min.cells.group = 10,
+                               min.cells.feature = 10,
+                               pseudocount.use = 1,
+                               assay = "RNA")
+
+set23.mtr.XY.filt.11hi27lo.DEG.het.hom <- FindMarkers(set23.mtr.XY.filt.11hi27lo,
+                               ident.1 = "het", 
+                               ident.2 = "hom",
+                               logfc.threshold = 0,
+                               test.use = "wilcox",
+                               min.pct = 0.1,
+                               only.pos = FALSE,
+                               min.cells.group = 10,
+                               min.cells.feature = 10,
+                               pseudocount.use = 1,
+                               assay = "RNA")
+```
+
+
+```{r}
+set23.mtr.XY.filt.11hi27lo.DEG.neg.hom_sub = subset(set23.mtr.XY.filt.11hi27lo.DEG.neg.hom, abs(avg_logFC)>log2(1.2) & p_val<0.05)
+
+vp.set23.mtr.XY.filt.11hi27lo.DEG.neg.hom = ggplot(set23.mtr.XY.filt.11hi27lo.DEG.neg.hom) +
+  geom_point(
+      data = set23.mtr.XY.filt.11hi27lo.DEG.neg.hom,
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "grey",
+      cex = 1
+    ) +
+  geom_point(
+      data = subset(set23.mtr.XY.filt.11hi27lo.DEG.neg.hom, abs(avg_logFC)>log2(1.2) & p_val<0.05),
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "red",
+      cex = 1
+    ) +
+  geom_text_repel(
+      data = set23.mtr.XY.filt.11hi27lo.DEG.neg.hom_sub,
+      aes(x = avg_logFC, y = -log10(p_val), label=rownames(set23.mtr.XY.filt.11hi27lo.DEG.neg.hom_sub)),
+      size = 2,
+      min.segment.length = unit(0, 'lines'),
+      box.padding = unit(0.35, "lines"),
+      point.padding = unit(0.3, "lines")
+    ) +
+    theme_bw(base_size = 14) +
+    ggtitle("set23 (neg vs hom)")
+
+vp.set23.mtr.XY.filt.11hi27lo.DEG.neg.hom
+```
+```{r}
+set23.mtr.XY.filt.11hi27lo.DEG.neg.het_sub = subset(set23.mtr.XY.filt.11hi27lo.DEG.neg.het, abs(avg_logFC)>log2(1.2) & p_val<0.05)
+
+vp.set23.mtr.XY.filt.11hi27lo.DEG.neg.het = ggplot(set23.mtr.XY.filt.11hi27lo.DEG.neg.het) +
+  geom_point(
+      data = set23.mtr.XY.filt.11hi27lo.DEG.neg.het,
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "grey",
+      cex = 1
+    ) +
+  geom_point(
+      data = subset(set23.mtr.XY.filt.11hi27lo.DEG.neg.het, abs(avg_logFC)>log2(1.2) & p_val<0.05),
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "red",
+      cex = 1
+    ) +
+  geom_text_repel(
+      data = set23.mtr.XY.filt.11hi27lo.DEG.neg.het_sub,
+      aes(x = avg_logFC, y = -log10(p_val), label=rownames(set23.mtr.XY.filt.11hi27lo.DEG.neg.het_sub)),
+      size = 2,
+      min.segment.length = unit(0, 'lines'),
+      box.padding = unit(0.35, "lines"),
+      point.padding = unit(0.3, "lines")
+    ) +
+    theme_bw(base_size = 14) +
+    ggtitle("set23 (neg vs het)")
+
+vp.set23.mtr.XY.filt.11hi27lo.DEG.neg.het
+```
+
+```{r}
+set23.mtr.XY.filt.11hi27lo.DEG.het.hom_sub = subset(set23.mtr.XY.filt.11hi27lo.DEG.het.hom, abs(avg_logFC)>log2(1.2) & p_val<0.05)
+
+vp.set23.mtr.XY.filt.11hi27lo.DEG.het.hom = ggplot(set23.mtr.XY.filt.11hi27lo.DEG.het.hom) +
+  geom_point(
+      data = set23.mtr.XY.filt.11hi27lo.DEG.het.hom,
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "grey",
+      cex = 1
+    ) +
+  geom_point(
+      data = subset(set23.mtr.XY.filt.11hi27lo.DEG.het.hom, abs(avg_logFC)>log2(1.2) & p_val<0.05),
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "red",
+      cex = 1
+    ) +
+  geom_text_repel(
+      data = set23.mtr.XY.filt.11hi27lo.DEG.het.hom_sub,
+      aes(x = avg_logFC, y = -log10(p_val), label=rownames(set23.mtr.XY.filt.11hi27lo.DEG.het.hom_sub)),
+      size = 2,
+      min.segment.length = unit(0, 'lines'),
+      box.padding = unit(0.35, "lines"),
+      point.padding = unit(0.3, "lines")
+    ) +
+    theme_bw(base_size = 14) +
+    ggtitle("set23 (het vs hom)")
+
+vp.set23.mtr.XY.filt.11hi27lo.DEG.het.hom
+```
+
+```{r}
+#Renaming the total dataset HTOs
+Idents(object = set23.mtr.XY.filt.11lo27hi) <- set23.mtr.XY.filt.11lo27hi@meta.data$HTO_classification
+set23.mtr.XY.filt.11lo27hi <- RenameIdents(object = set23.mtr.XY.filt.11lo27hi, 'het2' = 'het','het3' = 'het','hom2' = 'hom','hom3' = 'hom','neg2' = 'neg','neg3' = 'neg')
+table(set23.mtr.XY.filt.11lo27hi@active.ident)
+```
+
+```{r}
+set23.mtr.XY.filt.11lo27hi.DEG.neg.hom <- FindMarkers(set23.mtr.XY.filt.11lo27hi,
+                               ident.1 = "neg", 
+                               ident.2 = "hom",
+                               logfc.threshold = 0,
+                               test.use = "wilcox",
+                               min.pct = 0.1,
+                               only.pos = FALSE,
+                               min.cells.group = 10,
+                               min.cells.feature = 10,
+                               pseudocount.use = 1,
+                               assay = "RNA")
+
+set23.mtr.XY.filt.11lo27hi.DEG.neg.het <- FindMarkers(set23.mtr.XY.filt.11lo27hi,
+                               ident.1 = "neg", 
+                               ident.2 = "het",
+                               logfc.threshold = 0,
+                               test.use = "wilcox",
+                               min.pct = 0.1,
+                               only.pos = FALSE,
+                               min.cells.group = 10,
+                               min.cells.feature = 10,
+                               pseudocount.use = 1,
+                               assay = "RNA")
+
+set23.mtr.XY.filt.11lo27hi.DEG.het.hom <- FindMarkers(set23.mtr.XY.filt.11lo27hi,
+                               ident.1 = "het", 
+                               ident.2 = "hom",
+                               logfc.threshold = 0,
+                               test.use = "wilcox",
+                               min.pct = 0.1,
+                               only.pos = FALSE,
+                               min.cells.group = 10,
+                               min.cells.feature = 10,
+                               pseudocount.use = 1,
+                               assay = "RNA")
+```
+
+
+```{r}
+set23.mtr.XY.filt.11lo27hi.DEG.neg.hom_sub = subset(set23.mtr.XY.filt.11lo27hi.DEG.neg.hom, abs(avg_logFC)>log2(1.2) & p_val<0.05)
+
+vp.set23.mtr.XY.filt.11lo27hi.DEG.neg.hom = ggplot(set23.mtr.XY.filt.11lo27hi.DEG.neg.hom) +
+  geom_point(
+      data = set23.mtr.XY.filt.11lo27hi.DEG.neg.hom,
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "grey",
+      cex = 1
+    ) +
+  geom_point(
+      data = subset(set23.mtr.XY.filt.11lo27hi.DEG.neg.hom, abs(avg_logFC)>log2(1.2) & p_val<0.05),
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "red",
+      cex = 1
+    ) +
+  geom_text_repel(
+      data = set23.mtr.XY.filt.11lo27hi.DEG.neg.hom_sub,
+      aes(x = avg_logFC, y = -log10(p_val), label=rownames(set23.mtr.XY.filt.11lo27hi.DEG.neg.hom_sub)),
+      size = 2,
+      min.segment.length = unit(0, 'lines'),
+      box.padding = unit(0.35, "lines"),
+      point.padding = unit(0.3, "lines")
+    ) +
+    theme_bw(base_size = 14) +
+    ggtitle("set23 (neg vs hom)")
+
+vp.set23.mtr.XY.filt.11lo27hi.DEG.neg.hom
+```
+```{r}
+set23.mtr.XY.filt.11lo27hi.DEG.neg.het_sub = subset(set23.mtr.XY.filt.11lo27hi.DEG.neg.het, abs(avg_logFC)>log2(1.2) & p_val<0.05)
+
+vp.set23.mtr.XY.filt.11lo27hi.DEG.neg.het = ggplot(set23.mtr.XY.filt.11lo27hi.DEG.neg.het) +
+  geom_point(
+      data = set23.mtr.XY.filt.11lo27hi.DEG.neg.het,
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "grey",
+      cex = 1
+    ) +
+  geom_point(
+      data = subset(set23.mtr.XY.filt.11lo27hi.DEG.neg.het, abs(avg_logFC)>log2(1.2) & p_val<0.05),
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "red",
+      cex = 1
+    ) +
+  geom_text_repel(
+      data = set23.mtr.XY.filt.11lo27hi.DEG.neg.het_sub,
+      aes(x = avg_logFC, y = -log10(p_val), label=rownames(set23.mtr.XY.filt.11lo27hi.DEG.neg.het_sub)),
+      size = 2,
+      min.segment.length = unit(0, 'lines'),
+      box.padding = unit(0.35, "lines"),
+      point.padding = unit(0.3, "lines")
+    ) +
+    theme_bw(base_size = 14) +
+    ggtitle("set23 (neg vs het)")
+
+vp.set23.mtr.XY.filt.11lo27hi.DEG.neg.het
+```
+
+```{r}
+set23.mtr.XY.filt.11lo27hi.DEG.het.hom_sub = subset(set23.mtr.XY.filt.11lo27hi.DEG.het.hom, abs(avg_logFC)>log2(1.2) & p_val<0.05)
+
+vp.set23.mtr.XY.filt.11lo27hi.DEG.het.hom = ggplot(set23.mtr.XY.filt.11lo27hi.DEG.het.hom) +
+  geom_point(
+      data = set23.mtr.XY.filt.11lo27hi.DEG.het.hom,
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "grey",
+      cex = 1
+    ) +
+  geom_point(
+      data = subset(set23.mtr.XY.filt.11lo27hi.DEG.het.hom, abs(avg_logFC)>log2(1.2) & p_val<0.05),
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "red",
+      cex = 1
+    ) +
+  geom_text_repel(
+      data = set23.mtr.XY.filt.11lo27hi.DEG.het.hom_sub,
+      aes(x = avg_logFC, y = -log10(p_val), label=rownames(set23.mtr.XY.filt.11lo27hi.DEG.het.hom_sub)),
+      size = 2,
+      min.segment.length = unit(0, 'lines'),
+      box.padding = unit(0.35, "lines"),
+      point.padding = unit(0.3, "lines")
+    ) +
+    theme_bw(base_size = 14) +
+    ggtitle("set23 (het vs hom)")
+
+vp.set23.mtr.XY.filt.11lo27hi.DEG.het.hom
+```
+
+```{r}
+#Renaming the total dataset HTOs
+Idents(object = set23.mtr.XY.filt.11lo27lo) <- set23.mtr.XY.filt.11lo27lo@meta.data$HTO_classification
+set23.mtr.XY.filt.11lo27lo <- RenameIdents(object = set23.mtr.XY.filt.11lo27lo, 'het2' = 'het','het3' = 'het','hom2' = 'hom','hom3' = 'hom','neg2' = 'neg','neg3' = 'neg')
+table(set23.mtr.XY.filt.11lo27lo@active.ident)
+```
+
+```{r}
+set23.mtr.XY.filt.11lo27lo.DEG.neg.hom <- FindMarkers(set23.mtr.XY.filt.11lo27lo,
+                               ident.1 = "neg", 
+                               ident.2 = "hom",
+                               logfc.threshold = 0,
+                               test.use = "wilcox",
+                               min.pct = 0.1,
+                               only.pos = FALSE,
+                               min.cells.group = 10,
+                               min.cells.feature = 10,
+                               pseudocount.use = 1,
+                               assay = "RNA")
+
+set23.mtr.XY.filt.11lo27lo.DEG.neg.het <- FindMarkers(set23.mtr.XY.filt.11lo27lo,
+                               ident.1 = "neg", 
+                               ident.2 = "het",
+                               logfc.threshold = 0,
+                               test.use = "wilcox",
+                               min.pct = 0.1,
+                               only.pos = FALSE,
+                               min.cells.group = 10,
+                               min.cells.feature = 10,
+                               pseudocount.use = 1,
+                               assay = "RNA")
+
+set23.mtr.XY.filt.11lo27lo.DEG.het.hom <- FindMarkers(set23.mtr.XY.filt.11lo27lo,
+                               ident.1 = "het", 
+                               ident.2 = "hom",
+                               logfc.threshold = 0,
+                               test.use = "wilcox",
+                               min.pct = 0.1,
+                               only.pos = FALSE,
+                               min.cells.group = 10,
+                               min.cells.feature = 10,
+                               pseudocount.use = 1,
+                               assay = "RNA")
+```
+
+
+```{r}
+set23.mtr.XY.filt.11lo27lo.DEG.neg.hom_sub = subset(set23.mtr.XY.filt.11lo27lo.DEG.neg.hom, abs(avg_logFC)>log2(1.2) & p_val<0.05)
+
+vp.set23.mtr.XY.filt.11lo27lo.DEG.neg.hom = ggplot(set23.mtr.XY.filt.11lo27lo.DEG.neg.hom) +
+  geom_point(
+      data = set23.mtr.XY.filt.11lo27lo.DEG.neg.hom,
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "grey",
+      cex = 1
+    ) +
+  geom_point(
+      data = subset(set23.mtr.XY.filt.11lo27lo.DEG.neg.hom, abs(avg_logFC)>log2(1.2) & p_val<0.05),
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "red",
+      cex = 1
+    ) +
+  geom_text_repel(
+      data = set23.mtr.XY.filt.11lo27lo.DEG.neg.hom_sub,
+      aes(x = avg_logFC, y = -log10(p_val), label=rownames(set23.mtr.XY.filt.11lo27lo.DEG.neg.hom_sub)),
+      size = 2,
+      min.segment.length = unit(0, 'lines'),
+      box.padding = unit(0.35, "lines"),
+      point.padding = unit(0.3, "lines")
+    ) +
+    theme_bw(base_size = 14) +
+    ggtitle("set23 (neg vs hom)")
+
+vp.set23.mtr.XY.filt.11lo27lo.DEG.neg.hom
+```
+```{r}
+set23.mtr.XY.filt.11lo27lo.DEG.neg.het_sub = subset(set23.mtr.XY.filt.11lo27lo.DEG.neg.het, abs(avg_logFC)>log2(1.2) & p_val<0.05)
+
+vp.set23.mtr.XY.filt.11lo27lo.DEG.neg.het = ggplot(set23.mtr.XY.filt.11lo27lo.DEG.neg.het) +
+  geom_point(
+      data = set23.mtr.XY.filt.11lo27lo.DEG.neg.het,
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "grey",
+      cex = 1
+    ) +
+  geom_point(
+      data = subset(set23.mtr.XY.filt.11lo27lo.DEG.neg.het, abs(avg_logFC)>log2(1.2) & p_val<0.05),
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "red",
+      cex = 1
+    ) +
+  geom_text_repel(
+      data = set23.mtr.XY.filt.11lo27lo.DEG.neg.het_sub,
+      aes(x = avg_logFC, y = -log10(p_val), label=rownames(set23.mtr.XY.filt.11lo27lo.DEG.neg.het_sub)),
+      size = 2,
+      min.segment.length = unit(0, 'lines'),
+      box.padding = unit(0.35, "lines"),
+      point.padding = unit(0.3, "lines")
+    ) +
+    theme_bw(base_size = 14) +
+    ggtitle("set23 (neg vs het)")
+
+vp.set23.mtr.XY.filt.11lo27lo.DEG.neg.het
+```
+
+```{r}
+set23.mtr.XY.filt.11lo27lo.DEG.het.hom_sub = subset(set23.mtr.XY.filt.11lo27lo.DEG.het.hom, abs(avg_logFC)>log2(1.2) & p_val<0.05)
+
+vp.set23.mtr.XY.filt.11lo27lo.DEG.het.hom = ggplot(set23.mtr.XY.filt.11lo27lo.DEG.het.hom) +
+  geom_point(
+      data = set23.mtr.XY.filt.11lo27lo.DEG.het.hom,
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "grey",
+      cex = 1
+    ) +
+  geom_point(
+      data = subset(set23.mtr.XY.filt.11lo27lo.DEG.het.hom, abs(avg_logFC)>log2(1.2) & p_val<0.05),
+      aes(x = avg_logFC, y = -log10(p_val)),
+      color = "red",
+      cex = 1
+    ) +
+  geom_text_repel(
+      data = set23.mtr.XY.filt.11lo27lo.DEG.het.hom_sub,
+      aes(x = avg_logFC, y = -log10(p_val), label=rownames(set23.mtr.XY.filt.11lo27lo.DEG.het.hom_sub)),
+      size = 2,
+      min.segment.length = unit(0, 'lines'),
+      box.padding = unit(0.35, "lines"),
+      point.padding = unit(0.3, "lines")
+    ) +
+    theme_bw(base_size = 14) +
+    ggtitle("set23 (het vs hom)")
+
+vp.set23.mtr.XY.filt.11lo27lo.DEG.het.hom
+```
+
+```{r}
+#write results to file
+write.table(as.matrix(set23.mtr.XY.filt.11hi27hi.DEG.neg.hom),file="~/Desktop/NK_scRNA_input/201014_11hi27hi_set23dividedBefore.filt.DEG.neg.hom.wilcox.txt",sep="\t")
+write.table(as.matrix(set23.mtr.XY.filt.11hi27hi.DEG.neg.het),file="~/Desktop/NK_scRNA_input/201014_11hi27hi_set23dividedBefore.filt.DEG.neg.het.wilcox.txt",sep="\t")
+write.table(as.matrix(set23.mtr.XY.filt.11hi27hi.DEG.het.hom),file="~/Desktop/NK_scRNA_input/201014_11hi27hi_set23dividedBefore.filt.DEG.het.hom.wilcox.txt",sep="\t")
+
+write.table(as.matrix(set23.mtr.XY.filt.11hi27lo.DEG.neg.hom),file="~/Desktop/NK_scRNA_input/201014_11hi27lo_set23dividedBefore.filt.DEG.neg.hom.wilcox.txt",sep="\t")
+write.table(as.matrix(set23.mtr.XY.filt.11hi27lo.DEG.neg.het),file="~/Desktop/NK_scRNA_input/201014_11hi27lo_set23dividedBefore.filt.DEG.neg.het.wilcox.txt",sep="\t")
+write.table(as.matrix(set23.mtr.XY.filt.11hi27lo.DEG.het.hom),file="~/Desktop/NK_scRNA_input/201014_11hi27lo_set23dividedBefore.filt.DEG.het.hom.wilcox.txt",sep="\t")
+
+write.table(as.matrix(set23.mtr.XY.filt.11lo27hi.DEG.neg.hom),file="~/Desktop/NK_scRNA_input/201014_11lo27hi_set23dividedBefore.filt.DEG.neg.hom.wilcox.txt",sep="\t")
+write.table(as.matrix(set23.mtr.XY.filt.11lo27hi.DEG.neg.het),file="~/Desktop/NK_scRNA_input/201014_11lo27hi_set23dividedBefore.filt.DEG.neg.het.wilcox.txt",sep="\t")
+write.table(as.matrix(set23.mtr.XY.filt.11lo27hi.DEG.het.hom),file="~/Desktop/NK_scRNA_input/201014_11lo27hi_set23dividedBefore.filt.DEG.het.hom.wilcox.txt",sep="\t")
+
+write.table(as.matrix(set23.mtr.XY.filt.11lo27lo.DEG.neg.hom),file="~/Desktop/NK_scRNA_input/201014_11lo27lo_set23dividedBefore.filt.DEG.neg.hom.wilcox.txt",sep="\t")
+write.table(as.matrix(set23.mtr.XY.filt.11lo27lo.DEG.neg.het),file="~/Desktop/NK_scRNA_input/201014_11lo27lo_set23dividedBefore.filt.DEG.neg.het.wilcox.txt",sep="\t")
+write.table(as.matrix(set23.mtr.XY.filt.11lo27lo.DEG.het.hom),file="~/Desktop/NK_scRNA_input/201014_11lo27lo_set23dividedBefore.filt.DEG.het.hom.wilcox.txt",sep="\t")
+```
+
+#### Re-load data for re-production of volcano plots
+```{r}
+set23.11hi27hi.filt.DEG.neg.hom=read.delim("~/Desktop/NK_scRNA_input/201014_11hi27hi_set23dividedBefore.filt.DEG.neg.hom.wilcox.txt",sep="\t", row.names = 1)
+set23.11hi27hi.filt.DEG.neg.het=read.delim("~/Desktop/NK_scRNA_input/201014_11hi27hi_set23dividedBefore.filt.DEG.neg.het.wilcox.txt",sep="\t", row.names = 1)
+set23.11hi27hi.filt.DEG.het.hom=read.delim("~/Desktop/NK_scRNA_input/201014_11hi27hi_set23dividedBefore.filt.DEG.het.hom.wilcox.txt",sep="\t", row.names = 1)
+
+set23.11hi27lo.filt.DEG.neg.hom=read.delim("~/Desktop/NK_scRNA_input/201014_11hi27lo_set23dividedBefore.filt.DEG.neg.hom.wilcox.txt",sep="\t", row.names = 1)
+set23.11hi27lo.filt.DEG.neg.het=read.delim("~/Desktop/NK_scRNA_input/201014_11hi27lo_set23dividedBefore.filt.DEG.neg.het.wilcox.txt",sep="\t", row.names = 1)
+set23.11hi27lo.filt.DEG.het.hom=read.delim("~/Desktop/NK_scRNA_input/201014_11hi27lo_set23dividedBefore.filt.DEG.het.hom.wilcox.txt",sep="\t", row.names = 1)
+
+set23.11lo27hi.filt.DEG.neg.hom=read.delim("~/Desktop/NK_scRNA_input/201014_11lo27hi_set23dividedBefore.filt.DEG.neg.hom.wilcox.txt",sep="\t", row.names = 1)
+set23.11lo27hi.filt.DEG.neg.het=read.delim("~/Desktop/NK_scRNA_input/201014_11lo27hi_set23dividedBefore.filt.DEG.neg.het.wilcox.txt",sep="\t", row.names = 1)
+set23.11lo27hi.filt.DEG.het.hom=read.delim("~/Desktop/NK_scRNA_input/201014_11lo27hi_set23dividedBefore.filt.DEG.het.hom.wilcox.txt",sep="\t", row.names = 1)
+
+set23.11lo27lo.filt.DEG.neg.hom=read.delim("~/Desktop/NK_scRNA_input/201014_11lo27lo_set23dividedBefore.filt.DEG.neg.hom.wilcox.txt",sep="\t", row.names = 1)
+set23.11lo27lo.filt.DEG.neg.het=read.delim("~/Desktop/NK_scRNA_input/201014_11lo27lo_set23dividedBefore.filt.DEG.neg.het.wilcox.txt",sep="\t", row.names = 1)
+set23.11lo27lo.filt.DEG.het.hom=read.delim("~/Desktop/NK_scRNA_input/201014_11lo27lo_set23dividedBefore.filt.DEG.het.hom.wilcox.txt",sep="\t", row.names = 1)
+
+```
+
+#### additional volcano plots
+```{r}
+set23.11hi27hi.filt.DEG.neg.hom_sub = subset(set23.11hi27hi.filt.DEG.neg.hom, p_val_adj<0.05)
+
+vp.set23.11hi27hi.filt.DEG.neg.hom = ggplot(set23.11hi27hi.filt.DEG.neg.hom) +
+  geom_point(
+      data = set23.11hi27hi.filt.DEG.neg.hom,
+      aes(x = avg_logFC, y = -log10(p_val_adj)),
+      color = "grey",
+      cex = 1
+    ) +
+  geom_point(
+      data = subset(set23.11hi27hi.filt.DEG.neg.hom, p_val_adj<0.05),
+      aes(x = avg_logFC, y = -log10(p_val_adj)),
+      color = "red",
+      cex = 1
+    ) +
+    theme_bw(base_size = 14) +
+    ggtitle("set23.11hi27hi (neg vs hom)")
+vp.set23.11hi27hi.filt.DEG.neg.hom
+```
+
+```{r}
+set23.11hi27hi.filt.DEG.neg.het_sub = subset(set23.11hi27hi.filt.DEG.neg.het, p_val_adj<0.05)
+
+vp.set23.11hi27hi.filt.DEG.neg.het = ggplot(set23.11hi27hi.filt.DEG.neg.het) +
+  geom_point(
+      data = set23.11hi27hi.filt.DEG.neg.het,
+      aes(x = avg_logFC, y = -log10(p_val_adj)),
+      color = "grey",
+      cex = 1
+    ) +
+  geom_point(
+      data = subset(set23.11hi27hi.filt.DEG.neg.het, p_val_adj<0.05),
+      aes(x = avg_logFC, y = -log10(p_val_adj)),
+      color = "red",
+      cex = 1
+    ) +
+    theme_bw(base_size = 14) +
+    ggtitle("set23.11hi27hi (neg vs het)")
+```
+
+```{r}
+set23.11hi27hi.filt.DEG.het.hom_sub = subset(set23.11hi27hi.filt.DEG.het.hom, p_val_adj<0.05)
+
+vp.set23.11hi27hi.filt.DEG.het.hom = ggplot(set23.11hi27hi.filt.DEG.het.hom) +
+  geom_point(
+      data = set23.11hi27hi.filt.DEG.het.hom,
+      aes(x = avg_logFC, y = -log10(p_val_adj)),
+      color = "grey",
+      cex = 1
+    ) +
+  geom_point(
+      data = subset(set23.11hi27hi.filt.DEG.het.hom, p_val_adj<0.05),
+      aes(x = avg_logFC, y = -log10(p_val_adj)),
+      color = "red",
+      cex = 1
+    ) +
+    theme_bw(base_size = 14) +
+    ggtitle("set23.11hi27hi (het vs hom)")
+```
+
+```{r}
+set23.11hi27lo.filt.DEG.neg.hom_sub = subset(set23.11hi27lo.filt.DEG.neg.hom, p_val_adj<0.05)
+
+vp.set23.11hi27lo.filt.DEG.neg.hom = ggplot(set23.11hi27lo.filt.DEG.neg.hom) +
+  geom_point(
+      data = set23.11hi27lo.filt.DEG.neg.hom,
+      aes(x = avg_logFC, y = -log10(p_val_adj)),
+      color = "grey",
+      cex = 1
+    ) +
+  geom_point(
+      data = subset(set23.11hi27lo.filt.DEG.neg.hom, p_val_adj<0.05),
+      aes(x = avg_logFC, y = -log10(p_val_adj)),
+      color = "red",
+      cex = 1
+    ) +
+    theme_bw(base_size = 14) +
+    ggtitle("set23.11hi27lo (neg vs hom)")
+```
+
+```{r}
+set23.11hi27lo.filt.DEG.neg.het_sub = subset(set23.11hi27lo.filt.DEG.neg.het, p_val_adj<0.05)
+
+vp.set23.11hi27lo.filt.DEG.neg.het = ggplot(set23.11hi27lo.filt.DEG.neg.het) +
+  geom_point(
+      data = set23.11hi27lo.filt.DEG.neg.het,
+      aes(x = avg_logFC, y = -log10(p_val_adj)),
+      color = "grey",
+      cex = 1
+    ) +
+  geom_point(
+      data = subset(set23.11hi27lo.filt.DEG.neg.het, p_val_adj<0.05),
+      aes(x = avg_logFC, y = -log10(p_val_adj)),
+      color = "red",
+      cex = 1
+    ) +
+    theme_bw(base_size = 14) +
+    ggtitle("set23.11hi27lo (neg vs het)")
+```
+
+```{r}
+set23.11hi27lo.filt.DEG.het.hom_sub = subset(set23.11hi27lo.filt.DEG.het.hom, p_val_adj<0.05)
+
+vp.set23.11hi27lo.filt.DEG.het.hom = ggplot(set23.11hi27lo.filt.DEG.het.hom) +
+  geom_point(
+      data = set23.11hi27lo.filt.DEG.het.hom,
+      aes(x = avg_logFC, y = -log10(p_val_adj)),
+      color = "grey",
+      cex = 1
+    ) +
+  geom_point(
+      data = subset(set23.11hi27lo.filt.DEG.het.hom, p_val_adj<0.05),
+      aes(x = avg_logFC, y = -log10(p_val_adj)),
+      color = "red",
+      cex = 1
+    ) +
+    theme_bw(base_size = 14) +
+    ggtitle("set23.11hi27lo (het vs hom)")
+```
+
+```{r}
+set23.11lo27hi.filt.DEG.neg.hom_sub = subset(set23.11lo27hi.filt.DEG.neg.hom, p_val_adj<0.05)
+
+vp.set23.11lo27hi.filt.DEG.neg.hom = ggplot(set23.11lo27hi.filt.DEG.neg.hom) +
+  geom_point(
+      data = set23.11lo27hi.filt.DEG.neg.hom,
+      aes(x = avg_logFC, y = -log10(p_val_adj)),
+      color = "grey",
+      cex = 1
+    ) +
+  geom_point(
+      data = subset(set23.11lo27hi.filt.DEG.neg.hom, p_val_adj<0.05),
+      aes(x = avg_logFC, y = -log10(p_val_adj)),
+      color = "red",
+      cex = 1
+    ) +
+    theme_bw(base_size = 14) +
+    ggtitle("set23.11lo27hi (neg vs hom)")
+```
+
+```{r}
+set23.11lo27hi.filt.DEG.neg.het_sub = subset(set23.11lo27hi.filt.DEG.neg.het, p_val_adj<0.05)
+
+vp.set23.11lo27hi.filt.DEG.neg.het = ggplot(set23.11lo27hi.filt.DEG.neg.het) +
+  geom_point(
+      data = set23.11lo27hi.filt.DEG.neg.het,
+      aes(x = avg_logFC, y = -log10(p_val_adj)),
+      color = "grey",
+      cex = 1
+    ) +
+  geom_point(
+      data = subset(set23.11lo27hi.filt.DEG.neg.het, p_val_adj<0.05),
+      aes(x = avg_logFC, y = -log10(p_val_adj)),
+      color = "red",
+      cex = 1
+    ) +
+    theme_bw(base_size = 14) +
+    ggtitle("set23.11lo27hi (neg vs het)")
+```
+
+```{r}
+set23.11lo27hi.filt.DEG.het.hom_sub = subset(set23.11lo27hi.filt.DEG.het.hom, p_val_adj<0.05)
+
+vp.set23.11lo27hi.filt.DEG.het.hom = ggplot(set23.11lo27hi.filt.DEG.het.hom) +
+  geom_point(
+      data = set23.11lo27hi.filt.DEG.het.hom,
+      aes(x = avg_logFC, y = -log10(p_val_adj)),
+      color = "grey",
+      cex = 1
+    ) +
+  geom_point(
+      data = subset(set23.11lo27hi.filt.DEG.het.hom, p_val_adj<0.05),
+      aes(x = avg_logFC, y = -log10(p_val_adj)),
+      color = "red",
+      cex = 1
+    ) +
+    theme_bw(base_size = 14) +
+    ggtitle("set23.11lo27hi (het vs hom)")
+```
+
+```{r}
+set23.11lo27lo.filt.DEG.neg.hom_sub = subset(set23.11lo27lo.filt.DEG.neg.hom, p_val_adj<0.05)
+
+vp.set23.11lo27lo.filt.DEG.neg.hom = ggplot(set23.11lo27lo.filt.DEG.neg.hom) +
+  geom_point(
+      data = set23.11lo27lo.filt.DEG.neg.hom,
+      aes(x = avg_logFC, y = -log10(p_val_adj)),
+      color = "grey",
+      cex = 1
+    ) +
+  geom_point(
+      data = subset(set23.11lo27lo.filt.DEG.neg.hom, p_val_adj<0.05),
+      aes(x = avg_logFC, y = -log10(p_val_adj)),
+      color = "red",
+      cex = 1
+    ) +
+    theme_bw(base_size = 14) +
+    ggtitle("set23.11lo27lo (neg vs hom)")
+```
+
+```{r}
+set23.11lo27lo.filt.DEG.neg.het_sub = subset(set23.11lo27lo.filt.DEG.neg.het, p_val_adj<0.05)
+
+vp.set23.11lo27lo.filt.DEG.neg.het = ggplot(set23.11lo27lo.filt.DEG.neg.het) +
+  geom_point(
+      data = set23.11lo27lo.filt.DEG.neg.het,
+      aes(x = avg_logFC, y = -log10(p_val_adj)),
+      color = "grey",
+      cex = 1
+    ) +
+  geom_point(
+      data = subset(set23.11lo27lo.filt.DEG.neg.het, p_val_adj<0.05),
+      aes(x = avg_logFC, y = -log10(p_val_adj)),
+      color = "red",
+      cex = 1
+    ) +
+    theme_bw(base_size = 14) +
+    ggtitle("set23.11lo27lo (neg vs het)")
+```
+
+```{r}
+set23.11lo27lo.filt.DEG.het.hom_sub = subset(set23.11lo27lo.filt.DEG.het.hom, p_val_adj<0.05)
+
+vp.set23.11lo27lo.filt.DEG.het.hom = ggplot(set23.11lo27lo.filt.DEG.het.hom) +
+  geom_point(
+      data = set23.11lo27lo.filt.DEG.het.hom,
+      aes(x = avg_logFC, y = -log10(p_val_adj)),
+      color = "grey",
+      cex = 1
+    ) +
+  geom_point(
+      data = subset(set23.11lo27lo.filt.DEG.het.hom, p_val_adj<0.05),
+      aes(x = avg_logFC, y = -log10(p_val_adj)),
+      color = "red",
+      cex = 1
+    ) +
+    theme_bw(base_size = 14) +
+    ggtitle("set23.11lo27lo (het vs hom)")
+```
+
+
+
+```{r}
+d =plot_grid(ncol = 3,
+             vp.set23.11hi27hi.filt.DEG.neg.hom,
+             vp.set23.11hi27hi.filt.DEG.neg.het,
+             vp.set23.11hi27hi.filt.DEG.het.hom,
+             vp.set23.11hi27lo.filt.DEG.neg.hom,
+             vp.set23.11hi27lo.filt.DEG.neg.het,
+             vp.set23.11hi27lo.filt.DEG.het.hom,
+             vp.set23.11lo27hi.filt.DEG.neg.hom,
+             vp.set23.11lo27hi.filt.DEG.neg.het,
+             vp.set23.11lo27hi.filt.DEG.het.hom,
+             vp.set23.11lo27lo.filt.DEG.neg.hom,
+             vp.set23.11lo27lo.filt.DEG.neg.het,
+             vp.set23.11lo27lo.filt.DEG.het.hom
+)
+d
+```
+
+
+### heatmap with logFC values
+
+```{r}
+#re-load data
+heat_values = read.delim("~/Desktop/211130_DEG_heat_logFCvalues.txt", row.names = 1, header = T)
+heat_values2 = read.delim("~/Desktop/211130_DEG_heat_logFCvalues_rev.txt", row.names = 1, header = T)
+heat_hi = read.delim("~/Desktop/211210_DEG_heat_logFCvalues_highCD27.txt", row.names = 1, header = T)
+heat_lo = read.delim("~/Desktop/211210_DEG_heat_logFCvalues_lowCD27.txt", row.names = 1, header = T)
+heat_up = read.delim("~/Desktop/211213_summary_flat_sorted_upDdneg.txt", row.names = 1, header = T)
+heat_dn = read.delim("~/Desktop/211213_summary_flat_sorted_downDdneg.txt", row.names = 1, header = T)
+
+```
+
+```{r}
+breaksList = seq(-0.5, 0.5, by = 0.005)
+
+ph = pheatmap(heat_values, border_color = "black", cluster_rows = TRUE, cluster_cols = F,
+         color = colorRampPalette(c("#F63BF5", "black","#F3F32E"))(200),
+         breaks = breaksList)
+ph
+```
+
+```{r}
+pdf("~/Desktop/211130_DEG_heat_logFCvalues.pdf",width=2.8,height=14,paper='special') 
+ph
+dev.off()
+```
+
+```{r}
+breaksList = seq(-0.5, 0.5, by = 0.005)
+
+ph = pheatmap(heat_values2, border_color = "black", cluster_rows = TRUE, cluster_cols = F,
+         color = colorRampPalette(c("#F63BF5", "black","#F3F32E"))(200),
+         breaks = breaksList)
+ph
+```
+
+```{r}
+pdf("~/Desktop/211130_DEG_heat_logFCvalues_rev.pdf",width=2.8,height=14,paper='special') 
+ph
+dev.off()
+```
+
+
+```{r}
+breaksList = seq(-0.5, 0.5, by = 0.005)
+
+ph = pheatmap(heat_hi, border_color = "black", cluster_rows = F, cluster_cols = F,
+         color = colorRampPalette(c("#F63BF5", "black","#F3F32E"))(200),
+         breaks = breaksList)
+ph
+```
+
+```{r}
+pdf("~/Desktop/211210_DEG_heat_logFCvalues_highCD27.pdf",width=2.8,height=8,paper='special') 
+ph
+dev.off()
+```
+
+
+```{r}
+breaksList = seq(-0.5, 0.5, by = 0.005)
+
+ph = pheatmap(heat_lo, border_color = "black", cluster_rows = F, cluster_cols = F,
+         color = colorRampPalette(c("#F63BF5", "black","#F3F32E"))(200),
+         breaks = breaksList)
+ph
+```
+
+```{r}
+pdf("~/Desktop/211210_DEG_heat_logFCvalues_lowCD27.pdf",width=2.8,height=8,paper='special') 
+ph
+dev.off()
+```
+
+```{r}
+breaksList = seq(-0.5, 0.5, by = 0.005)
+
+ph = pheatmap(heat_dn, border_color = "black", cluster_rows = F, cluster_cols = F,
+         color = colorRampPalette(c("#F63BF5", "black","#F3F32E"))(200),
+         breaks = breaksList)
+ph
+```
+
+```{r}
+pdf("~/Desktop/211213_DEG_heat_logFCvalues_downDdneg.pdf",width=2.8,height=8,paper='special') 
+ph
+dev.off()
+```
+
+```{r}
+breaksList = seq(-0.5, 0.5, by = 0.005)
+
+ph = pheatmap(heat_up, border_color = "black", cluster_rows = F, cluster_cols = F,
+         color = colorRampPalette(c("#F63BF5", "black","#F3F32E"))(200),
+         breaks = breaksList)
+ph
+```
+
+```{r}
+pdf("~/Desktop/211213_DEG_heat_logFCvalues_upDdneg.pdf",width=2.8,height=8,paper='special') 
+ph
+dev.off()
+```
