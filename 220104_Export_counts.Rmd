@@ -1,0 +1,125 @@
+---
+title: "220104 - export count matrix for sharing on Arrayexpress"
+output: html_notebook
+---
+
+
+#### Load packages:
+```{r message=FALSE}
+library(Seurat)
+library(Matrix)
+library(dplyr)
+library(ggrepel)
+library(cowplot)
+library(ggplot2)
+library(rafalib)
+library(DOSE)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(tidyr)
+library(pheatmap)
+library(reshape2)
+```
+
+```{r}
+sessionInfo()
+```
+
+#### Load data:
+```{r}
+set1 = Read10X_h5("~/Desktop/10X_20_029_GE_filtered_feature_bc_matrix.h5", use.names = T)
+set1.htos = Read10X_h5("~/Desktop/10X_20_029_HTO_filtered_feature_bc_matrix.h5", use.names = T)
+
+set2 = Read10X_h5("~/Desktop/10X_20_030_GE_filtered_feature_bc_matrix.h5", use.names = T)
+set2.htos = Read10X_h5("~/Desktop/10X_20_030_HTO_filtered_feature_bc_matrix.h5", use.names = T)
+
+set3 = Read10X_h5("~/Desktop/10X_20_032_GE_filtered_feature_bc_matrix.h5", use.names = T)
+set3.htos = Read10X_h5("~/Desktop/10X_20_032_HTO_filtered_feature_bc_matrix.h5", use.names = T)
+```
+
+***
+# Demultiplexing with hashtag oligos (HTOs)
+```{r}
+#https://satijalab.org/seurat/v3.1/hashing_vignette.html
+
+# Select cell barcodes detected by both RNA and HTO
+joint.bcs.set1 = intersect(colnames(set1), colnames(set1.htos$`Antibody Capture`))
+joint.bcs.set2 = intersect(colnames(set2), colnames(set2.htos$`Antibody Capture`))
+joint.bcs.set3 = intersect(colnames(set3), colnames(set3.htos$`Antibody Capture`))
+
+# Subset RNA and HTO counts by joint cell barcodes
+set1 = set1[, joint.bcs.set1]
+set1.htos = as.matrix(set1.htos$`Antibody Capture`[, joint.bcs.set1])
+set2 = set2[, joint.bcs.set2]
+set2.htos = as.matrix(set2.htos$`Antibody Capture`[, joint.bcs.set2])
+set3 = set3[, joint.bcs.set3]
+set3.htos = as.matrix(set3.htos$`Antibody Capture`[, joint.bcs.set3])
+
+# Confirm that the HTO have the correct names
+rownames(set1.htos)
+rownames(set2.htos)
+rownames(set3.htos)
+```
+
+#### Rename the HTOs
+```{r}
+#       Tag 1	Tag 2	  Tag 3
+#set1:  homo  hetero  neg
+#set2:  neg   hetero	homo 
+#set3:  neg   hetero	homo 
+rownames(set1.htos) = c("hom1", "het1", "neg1")
+rownames(set2.htos) = c("neg2", "het2", "hom2")
+rownames(set3.htos) = c("neg3", "het3", "hom3")
+
+# Confirm that the HTO have the correct names
+rownames(set1.htos)
+rownames(set2.htos)
+rownames(set3.htos)
+```
+
+#### Export HTOs to txt file for upload to Arrayexpress
+```{r}
+write.table(as.matrix(set1.htos), 
+            '~/Desktop/10X_20_029_HTO_filtered_feature_bc_matrix.txt', 
+            sep = '\t', row.names = T, col.names = T, quote = F)
+```
+
+```{r}
+write.table(as.matrix(set2.htos), 
+            '~/Desktop/10X_20_030_HTO_filtered_feature_bc_matrix.txt', 
+            sep = '\t', row.names = T, col.names = T, quote = F)
+```
+
+```{r}
+write.table(as.matrix(set3.htos), 
+            '~/Desktop/10X_20_032_HTO_filtered_feature_bc_matrix.txt', 
+            sep = '\t', row.names = T, col.names = T, quote = F)
+```
+
+#### Setup Seurat objects of gene counts
+```{r}
+# Setup Seurat object
+set1.hashtag = CreateSeuratObject(counts = set1, project = "set1")
+set2.hashtag = CreateSeuratObject(counts = set2, project = "set2")
+set3.hashtag = CreateSeuratObject(counts = set3, project = "set3")
+```
+
+
+#### Export gene counts to txt file for upload to Arrayexpress
+```{r}
+write.table(as.matrix(GetAssayData(object = set1.hashtag, slot = "counts")), 
+            '~/Desktop/10X_20_029_GE_filtered_feature_bc_matrix.txt', 
+            sep = '\t', row.names = T, col.names = T, quote = F)
+```
+
+```{r}
+write.table(as.matrix(GetAssayData(object = set2.hashtag, slot = "counts")), 
+            '~/Desktop/10X_20_030_GE_filtered_feature_bc_matrix.txt', 
+            sep = '\t', row.names = T, col.names = T, quote = F)
+```
+
+```{r}
+write.table(as.matrix(GetAssayData(object = set3.hashtag, slot = "counts")), 
+            '~/Desktop/10X_20_032_GE_filtered_feature_bc_matrix.txt', 
+            sep = '\t', row.names = T, col.names = T, quote = F)
+```
